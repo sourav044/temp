@@ -233,15 +233,15 @@ print("\n--- ✅ Step 3 Complete: All models are loaded and cached.---\n")
 
 
 # 4. AGENT BREAKDOWN
-
 # 4.1. 🔹 Schema Extractor Agent (Upgraded with Semantic Type Inference and SQLDatabase)
 class SchemaExtractorAgent:
     """
     Extracts, enriches, and caches the database schema, including semantic type inference
     and linguistic variations, now using LangChain's SQLDatabase for introspection.
     """
-    def __init__(self, db: SQLDatabase, cache_path: str):
+    def __init__(self, db: SQLDatabase, db_path: str, cache_path: str):
         self.db = db
+        self.db_path = db_path
         self.cache_path = cache_path
         self.semantic_patterns = {
             "DATETIME": re.compile(r"^\d{4}-\d{2}-\d{2}( \d{2}:?\d{2}:?\d{2})?$"),
@@ -277,31 +277,22 @@ class SchemaExtractorAgent:
 
         variations = set()
         
-        # Initial processing: split column name into words
-        # Handle symbols like 'goals+assists' -> 'goals assists'
         cleaned_col_name = re.sub(r'[^a-zA-Z0-9_]', ' ', col_name)
-        # Split by underscore and camelCase
         words = re.findall(r'[A-Z]?[a-z]+|[0-9]+', cleaned_col_name)
         
-        # Remove table name from the initial words if it's a prefix or a standalone word
         filtered_words = []
         table_name_lower = table_name.lower()
         for word in words:
             lower_word = word.lower()
-            # If the word is exactly the table name, or starts with the table name followed by an underscore,
-            # we consider it a table name component to be removed or truncated.
             if lower_word == table_name_lower:
-                # Skip the word if it's exactly the table name
                 continue
             elif lower_word.startswith(table_name_lower + '_'):
-                # If it's like 'purchase_id', keep 'id' part
                 remaining_part = word[len(table_name_lower)+1:]
-                if remaining_part: # Only add if there's something left
+                if remaining_part:
                     filtered_words.append(remaining_part)
-            else: # Otherwise, keep the word
+            else:
                 filtered_words.append(word)
 
-        # Process filtered words for lemmas and synonyms
         for word in filtered_words:
             lower_word = word.lower()
             if lower_word and lower_word not in english_stopwords:
@@ -316,12 +307,10 @@ class SchemaExtractorAgent:
                 except Exception:
                     pass
         
-        # Add the original column name and its lemma if it's not just the table name
         if col_name.lower() != table_name_lower and col_name.lower() not in variations:
             variations.add(col_name.lower())
             variations.add(lemmatizer.lemmatize(col_name.lower()))
 
-        # Ensure no empty strings or duplicates
         final_variations = {v for v in variations if v and not v.isspace()}
         
         return sorted(list(final_variations))
@@ -335,95 +324,60 @@ class SchemaExtractorAgent:
             print(f"   [DEBUG] Type of tables_raw from get_usable_table_names(): {type(tables_raw)}")
             print(f"   [DEBUG] Content of tables_raw from get_usable_table_names(): {tables_raw}")
 
-            # Defensive check: Ensure tables_raw is a list of strings
-            tables_to_process = []
-            if not isinstance(tables_raw, list):
-                if isinstance(tables_raw, str):
-                    # If it's a single string, assume it's a single table name and wrap it in a list
-                    print(f"   [WARNING] get_usable_table_names() returned a string, wrapping it in a list: '{tables_raw}'")
-                    tables_to_process = [tables_raw]
-                else:
-                    # If it's neither a list nor a string, it's an unexpected type, raise an error
-                    raise TypeError(f"Unexpected type for tables_raw: {type(tables_raw)}. Expected list of strings or a single string table name.")
-            else:
-                # If it's already a list, ensure all elements are strings
-                tables_to_process = [str(t) for t in tables_raw]
-                if any(not isinstance(t, str) for t in tables_to_process):
-                    print(f"   [WARNING] tables_raw is a list but contains non-string elements. Converting all to string.")
-
+            tables_to_process = [str(t) for t in tables_raw]
             print(f"   [Info] Processing {len(tables_to_process)} tables in the database.")
 
             for table_name_original in tables_to_process:
                 table_name_lower = table_name_original.lower()
                 print(f"   [Info] Processing table: '{table_name_original}'")
 
-                # Use SQLDatabase's get_table_info for column details and sample rows
-                # This method returns a string, so we'll parse it or use direct SQLAlchemy access for more detail
-                table_info_str = self.db.get_table_info(table_name_original)
-                
-                # A more robust way to get column types and sample rows would be direct SQLAlchemy access
-                # For simplicity here, we'll parse the string or rely on SQLDatabase's default info.
-                # To get actual sample rows, we'd need to execute a query.
-                sample_rows = []
-                try:
-                    # Execute a direct query to get sample rows for semantic type inference
-                    with sqlite3.connect(self.db.engine.url.database) as conn:
-                        sample_df = pd.read_sql_query(f"SELECT * FROM \"{table_name_original}\" LIMIT 3", conn)
-                        sample_rows = sample_df.to_dict(orient='records')
-                except Exception as e:
-                    print(f"      [Warning] Could not get sample rows for '{table_name_original}': {e}")
-
                 columns = {}
                 primary_keys = []
                 column_names_ordered = []
+                sample_rows = []
 
-                # Parse table_info_str to get column names and types (simplified)
-                # For more detailed info, direct SQLAlchemy reflection would be needed.
-                # This is a simplified parsing assuming the format from get_table_info()
-                lines = table_info_str.split('\n')
-                in_create_table = False
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith("CREATE TABLE"):
-                        in_create_table = True
-                        continue
-                    if in_create_table and line.startswith(")") or line.startswith("/*"): # End of create table or start of comments
-                        in_create_table = False
-                        break
-                    if in_create_table and line.startswith('"') and ' ' in line: # Likely a column definition
-                        parts = line.split(' ')
-                        col_name_quoted = parts[0]
-                        col_name = col_name_quoted.strip('"').strip('`') # Remove quotes/backticks
-                        physical_type = parts[1].strip(',').strip().upper() if len(parts) > 1 else 'UNKNOWN'
-                        
-                        column_names_ordered.append(col_name)
-                        
-                        sample_values = [r.get(col_name) for r in sample_rows if r is not None]
-                        semantic_type = self._infer_semantic_type(sample_values)
-                        
-                        if semantic_type:
-                            physical_type = semantic_type
+                try:
+                    with sqlite3.connect(self.db_path) as conn:
+                        cursor = conn.cursor()
+
+                        try:
+                            sample_df = pd.read_sql_query(f"SELECT * FROM \"{table_name_original}\" LIMIT 3", conn)
+                            sample_rows = sample_df.to_dict(orient='records')
+                        except Exception as e:
+                            print(f"      [Warning] Could not get sample rows for '{table_name_original}': {e}")
+
+                        cursor.execute(f"PRAGMA table_info('{table_name_original}');")
+                        for col_info in cursor.fetchall():
+                            col_name = col_info[1]
+                            physical_type = col_info[2]
+                            column_names_ordered.append(col_name)
+
+                            if col_info[5] == 1:
+                                primary_keys.append(col_name)
+
+                            sample_values = [r.get(col_name) for r in sample_rows if r is not None]
+                            semantic_type = self._infer_semantic_type(sample_values)
                             
-                        columns[col_name] = {
-                            "physical_type": physical_type,
-                            "variations": self._get_linguistic_variations(col_name, table_name_lower)
-                        }
-                        if "PRIMARY KEY" in line.upper():
-                            primary_keys.append(col_name)
+                            # If a semantic type is inferred, it overrides the physical type.
+                            final_type = semantic_type if semantic_type else physical_type.upper()
+                            
+                            columns[col_name] = {
+                                "physical_type": final_type,
+                                "variations": self._get_linguistic_variations(col_name, table_name_lower)
+                            }
+                        
+                        cursor.execute(f"PRAGMA foreign_key_list('{table_name_original}');")
+                        for fk in cursor.fetchall():
+                            schema_data["relationships"].append({
+                                "from_table": table_name_lower,
+                                "from_column": fk[3],
+                                "to_table": fk[2].lower(),
+                                "to_column": fk[4]
+                            })
 
-
-                # Relationships (Foreign Keys) - SQLDatabase does not directly expose this in a simple way
-                # We will keep the direct sqlite3 approach for foreign keys for now.
-                with sqlite3.connect(self.db.engine.url.database) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(f"PRAGMA foreign_key_list('{table_name_original}');")
-                    for fk in cursor.fetchall():
-                        schema_data["relationships"].append({
-                            "from_table": table_name_lower,
-                            "from_column": fk[3],
-                            "to_table": fk[2].lower(),
-                            "to_column": fk[4]
-                        })
+                except Exception as e:
+                    print(f"      [ERROR] Failed to process table '{table_name_original}': {e}")
+                    continue
 
                 schema_data["tables"][table_name_lower] = {
                     "columns": columns,
@@ -432,6 +386,7 @@ class SchemaExtractorAgent:
                     "variations": self._get_linguistic_variations(table_name_lower, table_name_lower),
                     "sample_rows": sample_rows
                 }
+            
             print(f"   [Info] Extracted {len(schema_data['relationships'])} relationships.")
 
         except Exception as e:
@@ -449,7 +404,8 @@ class SchemaExtractorAgent:
             return None
 
 # --- Generate and Configure Smart Schema ---
-schema_agent = SchemaExtractorAgent(db=db, cache_path=CONFIG['db_structured_schema_path'])
+# Pass the db_path to the agent for direct sqlite3 connections
+schema_agent = SchemaExtractorAgent(db=db, db_path=CONFIG['db_path'], cache_path=CONFIG['db_structured_schema_path'])
 structured_schema_path = schema_agent.run()
 
 if structured_schema_path and os.path.exists(structured_schema_path):
