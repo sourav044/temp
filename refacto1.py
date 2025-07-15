@@ -198,7 +198,7 @@ class ModelManager:
                                                       torch_dtype=torch.bfloat16,
                                                       device_map=device_map)
         pipe = pipeline("text-generation", model=model, tokenizer=tokenizer,
-                        max_new_tokens=512, return_full_text=False)
+                        max_new_tokens=1024, return_full_text=False)
         print(f"   ✅ Reasoning LLM loaded onto '{device_map}'.")
         return HuggingFacePipeline(pipeline=pipe)
 
@@ -406,6 +406,100 @@ else:
     print("--- CRITICAL WARNING: Failed to generate structured schema. Agent will not perform well.---\n")
 
 
+
+# 4.X. 🔹 Query Splitter Agent (New: with LLM Reasoning)
+class QuerySplitterAgent:
+    """
+    Determines if a natural language query should be split into multiple sub-queries
+    based on LLM reasoning.
+    """
+    def __init__(self, model_manager: ModelManager):
+        self.reasoning_llm = model_manager.get('reasoning_llm')
+        print("QuerySplitterAgent initialized with LLM for query splitting.")
+
+    def _get_query_splitting_prompt(self, query: str) -> str:
+        """Generates a prompt for the LLM to decide on query splitting."""
+        prompt = f"""<Instructions>
+You are an expert SQL query analyst. Your task is to analyze a given natural language question and determine if it represents a single, cohesive SQL query or if it can logically be broken down into multiple independent sub-queries.
+
+Consider the following:
+- If the question asks for information that clearly requires combining data from different, unrelated analytical perspectives (e.g., "Show me sales by region AND the average customer age"), it might be split.
+- If the question involves complex aggregations, subqueries, or joins that are all part of a single logical answer, it should be treated as one query.
+- Prioritize treating it as a single query unless there's a strong, unambiguous reason to split.
+
+Output your response in a structured JSON format.
+
+If the query should NOT be split:
+{{
+  "should_split": false,
+  "reasoning": "The query is cohesive and can be answered with a single SQL statement."
+}}
+
+If the query SHOULD be split:
+{{
+  "should_split": true,
+  "reasoning": "The query combines distinct requests that are better handled as separate SQL queries.",
+  "sub_queries": [
+    "first natural language sub-query part",
+    "second natural language sub-query part"
+  ]
+}}
+</Instructions>
+
+<Question>
+{query}
+</Question>
+
+<Response>
+"""
+        return prompt
+
+    def run(self, query: str) -> Tuple[bool, List[str], str]:
+        """
+        Determines if the query should be split and returns the decision,
+        sub-queries (if split), and reasoning.
+        """
+        print(f"\n--- [MONITOR] Query Splitter Agent: Analyzing query for splitting: '{query}' ---")
+
+        prompt = self._get_query_splitting_prompt(query)
+        raw_llm_response = self.reasoning_llm.invoke(prompt)
+        if hasattr(raw_llm_response, 'content'):
+            raw_llm_response = raw_llm_response.content
+
+        try:
+            # Extract JSON from the LLM's raw response
+            match = re.search(r'\{.*\}', raw_llm_response, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                llm_decision = json.loads(json_str)
+            else:
+                print(f"   [Warning] LLM response did not contain valid JSON for splitting. Assuming no split. Raw: {raw_llm_response[:200]}...")
+                return False, [query], "LLM response parsing failed, defaulting to single query."
+        except json.JSONDecodeError as e:
+            print(f"   [Warning] JSON decoding error in LLM response for splitting: {e}. Raw: {raw_llm_response[:200]}...")
+            return False, [query], f"JSON decoding error, defaulting to single query: {e}"
+
+        should_split = llm_decision.get("should_split", False)
+        reasoning = llm_decision.get("reasoning", "No specific reasoning provided by LLM.")
+        sub_queries = llm_decision.get("sub_queries", [query] if not should_split else [])
+
+        if should_split and not sub_queries:
+            print("   [Warning] LLM suggested splitting but provided no sub-queries. Defaulting to original query.")
+            should_split = False
+            sub_queries = [query]
+            reasoning = "LLM suggested split but did not provide sub-queries, defaulting to single."
+        elif not should_split:
+            sub_queries = [query] # Ensure original query is returned if no split
+
+        print(f"   [Decision] Query Splitter Agent: Should Split: {should_split}. Reasoning: {reasoning}")
+        if should_split:
+            print(f"   [Info] Generated Sub-Queries: {sub_queries}")
+        else:
+            print(f"   [Info] Query treated as a single unit.")
+        
+        return should_split, sub_queries, reasoning
+
+
 # 4.2. 🔹 Table Selector Agent (Enhanced with LLM Reasoning and Confidence)
 class TableSelectorAgent:
     """
@@ -477,7 +571,7 @@ Output your response in a structured JSON format with a list of tables, their re
         """Parses the LLM's JSON response for table selection."""
         try:
             # FIX: Corrected regex to match JSON array/object structure more reliably
-            match = re.search(r'\[\s*\{.*\s*\}\s*\]|\{\s*.*?\}', raw_response, re.DOTALL) # Reverted to more robust regex
+            match = re.search(r'\[\s*\{.*?\s*\}\s*\]|\{\s*.*?\}', raw_response, re.DOTALL) # Reverted to more robust regex
             if match:
                 json_str = match.group(0)
                 return json.loads(json_str)
@@ -527,7 +621,7 @@ Output your response in a structured JSON format with a list of tables, their re
         print("\n--- [MONITOR] Table Selector Agent: Starting table selection ---")
 
         # --- LLM-based Table Reasoning ---
-        print("   [Info] Attempting LLM-based table reasoning...")
+        print("   [Info] Attempting LLM-based table reasoning...") # Moved this print statement
         prompt = self._get_llm_table_reasoning_prompt(query)
         raw_llm_response = self.reasoning_llm.invoke(prompt)
         if hasattr(raw_llm_response, 'content'):
@@ -535,7 +629,7 @@ Output your response in a structured JSON format with a list of tables, their re
         
         llm_selections = self._parse_llm_response(raw_llm_response)
         
-        selected_tables = set()
+        llm_proposed_table_names = set() # Changed name to reflect all proposed tables
         print("   [Decision] LLM Table Reasoning Results:")
         for item in llm_selections:
             table_name = item.get('table')
@@ -543,34 +637,48 @@ Output your response in a structured JSON format with a list of tables, their re
             reasoning = item.get('reasoning', 'No reasoning provided.')
             
             if table_name and table_name.lower() in self.table_names:
+                print(f"      - Table '{table_name}': Confidence: {confidence:.2f}, Reason: {reasoning}")
+                # Always add to llm_proposed_table_names if valid, regardless of confidence
+                llm_proposed_table_names.add(table_name.lower())
+                # Still print if it meets threshold for debugging/info
                 if confidence >= self.llm_threshold:
-                    selected_tables.add(table_name.lower())
-                    print(f"      ✅ Selected '{table_name}' (Confidence: {confidence:.2f}, Reason: {reasoning})")
+                    print(f"        ✅ Meets LLM Threshold (Confidence: {confidence:.2f} >= {self.llm_threshold})")
                 else:
-                    print(f"      ❌ Rejected '{table_name}' (Confidence: {confidence:.2f} < {self.llm_threshold}, Reason: {reasoning})")
+                    print(f"        ⚠️ Below LLM Threshold (Confidence: {confidence:.2f} < {self.llm_threshold})")
             else:
                 print(f"      [Warning] LLM proposed unknown table: '{table_name}'")
 
-        # --- Fallback to Embeddings if LLM is insufficient ---
-        if not selected_tables or any(item.get('confidence', 0.0) < self.llm_threshold for item in llm_selections):
-            print("   [Info] LLM selection insufficient or low confidence. Engaging embedding fallback.")
+        final_selected_tables = []
+
+        if llm_proposed_table_names:
+            # If LLM proposed any tables, use them (regardless of individual confidence)
+            final_selected_tables = sorted(list(llm_proposed_table_names))
+            print(f"   [Decision] LLM proposed tables. Using LLM selections: {final_selected_tables}")
+        else:
+            # Only engage embedding fallback if LLM failed to propose any tables
+            print("   [Info] LLM did not propose any tables. Engaging embedding fallback.")
             embedding_scores = self._embedding_fallback(query)
+            embedding_selected_table_names = set()
+            print("   [Decision] Embedding Fallback Results:")
             for table_name, score in embedding_scores:
+                print(f"      - Table '{table_name}': Score: {score:.4f}")
                 if score >= self.embedding_threshold:
-                    if table_name.lower() not in selected_tables:
-                        print(f"      ✅ Selected '{table_name}' via embedding (Score: {score:.4f} >= {self.embedding_threshold})")
-                        selected_tables.add(table_name.lower())
+                    embedding_selected_table_names.add(table_name.lower())
+                    print(f"        ✅ Selected by Embedding (Score: {score:.4f} >= {self.embedding_threshold})")
                 else:
-                    if table_name.lower() not in selected_tables:
-                         print(f"      ❌ Rejected '{table_name}' via embedding (Score: {score:.4f} < {self.embedding_threshold})")
+                    print(f"        ❌ Rejected by Embedding (Score: {score:.4f} < {self.embedding_threshold})")
+            
+            if embedding_selected_table_names:
+                final_selected_tables = sorted(list(embedding_selected_table_names))
+                print(f"   [Decision] Using embedding selections: {final_selected_tables}")
+            else:
+                # Fallback to all tables if both LLM and embedding are empty
+                final_selected_tables = self.table_names
+                print("   [Warning] No tables selected by LLM or embedding. Defaulting to all tables for broad search.")
 
-
-        final_selected_tables = sorted(list(selected_tables))
-        if not final_selected_tables:
-            print("   [Warning] No tables selected. Defaulting to all tables for broad search.")
-            final_selected_tables = self.table_names
         print(f"--- [MONITOR] Table Selector Agent: Final selected tables: {final_selected_tables} ---\n")
         return final_selected_tables
+
 
 
 # 4.3. 🔹 Relationship Mapper Agent (Enhanced with BGE-M3 Integration and Column Pruning)
@@ -961,27 +1069,28 @@ class SchemaCompressorAgent:
             cols = info.get('columns', [])
             schema_parts.append(f"{tbl}({', '.join(cols)})") # No newline here, add later
 
-        compressed_schema_str = "\n".join(sorted(schema_parts))
+        compressed_schema_str = "\\n".join(sorted(schema_parts))
         
         if relationships:
-            compressed_schema_str += "\n\n/* RELATIONSHIPS */\n"
+            compressed_schema_str += "\\n\\n/* RELATIONSHIPS */\\n"
             for rel in relationships:
                 if rel.get('type') == 'semantic_suggested':
-                    compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']} (Semantic Confidence: {rel['confidence']:.2f})\n"
+                    compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']} (Semantic Confidence: {rel['confidence']:.2f})\\n"
                 else:
-                    compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']} (Confidence: {rel['confidence']:.2f})\n" # Added confidence for explicit
+                    # For explicit FK relationships, just state the join as requested.
+                    compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']}\\n"
         
         if suggested_group_by_columns:
-            compressed_schema_str += "\n/* AGGREGATION HINTS */\n"
-            compressed_schema_str += f"Query might require GROUP BY on: {', '.join(suggested_group_by_columns)}\n"
+            compressed_schema_str += "\\n/* AGGREGATION HINTS */\\n"
+            compressed_schema_str += f"Query might require GROUP BY on: {', '.join(suggested_group_by_columns)}\\n"
 
         if suggested_filter_values:
-            compressed_schema_str += "\n/* FILTERING HINTS (Sample Values) */\n"
+            compressed_schema_str += "\\n/* FILTERING HINTS (Sample Values) */\\n"
             for col, values in suggested_filter_values.items():
-                compressed_schema_str += f"- {col}: {', '.join(map(str, values))}\n"
+                compressed_schema_str += f"- {col}: {', '.join(map(str, values))}\\n"
 
-        indented_output = compressed_schema_str.replace('\n', '\n      ')
-        print(f"   [Output] Compressed Schema for LLM:\n      {indented_output}")
+        indented_output = compressed_schema_str.replace('\\n', '\\n      ')
+        print(f"   [Output] Compressed Schema for LLM:\\n      {indented_output}")
         return compressed_schema_str
 
 
@@ -1287,27 +1396,16 @@ class AgentState(TypedDict):
 nlp = model_manager.get("spacy_model")
 
 # --- Agent Nodes (Functions for LangGraph) ---
-def query_splitter_node(state: AgentState) -> AgentState:
+def query_splitter_node(state: AgentState, manager: ModelManager) -> AgentState: # Added manager parameter
     print("\n--- [MONITOR] Query Splitter: Splitting query into sub-queries ---")
     query = state['query']
-    sub_queries = []
-
-    if nlp:
-        doc = nlp(query)
-        # Attempt to split by sentence, but also handle "and" as a delimiter for multiple intents
-        sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
-        
-        # Further split sentences by "and" if they contain multiple distinct intents
-        for sentence in sentences:
-            if " and " in sentence.lower():
-                parts = [p.strip() for p in sentence.split(" and ") if p.strip()]
-                sub_queries.extend(parts)
-            else:
-                sub_queries.append(sentence)
-    else:
-        print("   [Warning] spaCy not available. Using basic splitting on 'and'.")
-        sub_queries = [q.strip() for q in query.split(" and ") if q.strip()]
     
+    # Instantiate the QuerySplitterAgent
+    query_splitter_agent = QuerySplitterAgent(model_manager=manager) 
+    
+    # Run the agent to get the splitting decision and sub-queries
+    should_split, sub_queries, reasoning = query_splitter_agent.run(query)
+
     # Filter out empty strings and ensure uniqueness if desired (though not strictly necessary for processing)
     sub_queries = [q for q in sub_queries if q]
     
@@ -1565,7 +1663,7 @@ def route_from_sql_executor(state: AgentState) -> str:
 workflow = StateGraph(AgentState)
 
 # Add nodes
-workflow.add_node("query_splitter", query_splitter_node) # New entry point
+workflow.add_node("query_splitter", lambda state: query_splitter_node(state, model_manager)) 
 workflow.add_node("table_selector", lambda state: table_selector_node(state, CONFIG, model_manager))
 workflow.add_node("relationship_mapper", lambda state: relationship_mapper_node(state, CONFIG, model_manager))
 workflow.add_node("schema_compressor", schema_compressor_node)
