@@ -67,6 +67,7 @@ import spacy
 
 # --- LangChain & Transformers Imports ---
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
+from langchain.chains import LLMChain  
 from langchain_huggingface import HuggingFacePipeline
 from langchain_community.utilities.sql_database import SQLDatabase # Keep this import
 from sentence_transformers import SentenceTransformer, util # For embeddings
@@ -74,7 +75,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI # New import for ChatG
 from langchain_core.prompts import ChatPromptTemplate # New import from user's snippet
 from langchain_core.tools import tool # New import from user's snippet
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage # New import from user's snippet
-
+  
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent # New import for LangChain SQL Agent
@@ -104,7 +105,11 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
 # --- FIX: Prevent SystemError by disabling tokenizer parallelism ---
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "false" 
+
+# --- NEW: Disable LangSmith tracing to prevent API key warnings ---\
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGCHAIN_API_KEY"] = " " 
 
 # --- CONFIGURATION DICTIONARY ---
 CONFIG = {
@@ -148,11 +153,6 @@ print("\n--- ✅ Step 2 Complete: Imports and configuration are set.---\n")
 db = SQLDatabase.from_uri(f"sqlite:///{CONFIG['db_path']}")
 print(f"--- SQLDatabase object initialized for {CONFIG['db_path']} ---\n")
 
-# Set up Google API Key for ChatGoogleGenerativeAI
-import getpass
-if not os.environ.get("GOOGLE_API_KEY"):
-  os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter API key for Google Gemini: ")
-
 # 3. MODEL MANAGER (Eager Loading)
 print("--- Step 3: Eagerly Loading All Models into Memory ---")
 
@@ -168,7 +168,6 @@ class ModelManager:
             'embedding': self._load_embedding_model,
             'reasoning_llm': self._load_reasoning_llm,
             'spacy_model': self._load_spacy_model, # Added spaCy model loader
-            'chat_llm': self._load_chat_llm, # Added for ChatGoogleGenerativeAI
         }
         print("✅ ModelManager initialized. Models will be loaded on demand.")
 
@@ -214,20 +213,12 @@ class ModelManager:
             print(f"   [ERROR] Failed to load spaCy model: {e}. Please ensure it's downloaded.")
             return None
 
-    def _load_chat_llm(self):
-        """Loads the Chat LLM (Gemini) for tool-calling agents."""
-        print("   -> Loading Chat LLM (Gemini-2.0-Flash) for tool-calling agents...")
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
-        print("   ✅ Chat LLM (Gemini-2.0-Flash) loaded.")
-        return llm
-
 # --- EAGER LOADING EXECUTION ---
 model_manager = ModelManager(CONFIG)
 print("\nPre-loading all required models...")
 model_manager.get('embedding')
 model_manager.get('reasoning_llm') # This is Gemma (HuggingFacePipeline)
 model_manager.get('spacy_model')
-model_manager.get('chat_llm') # This is Gemini-2.0-Flash (ChatGoogleGenerativeAI)
 
 print("\n--- ✅ Step 3 Complete: All models are loaded and cached.---\n")
 
@@ -1157,7 +1148,8 @@ class ErrorRemediationAgent:
             return "MissingColumn"
         elif "syntax error" in error_lower:
             return "SyntaxError"
-        elif re.search(r"<[a-zA-Z0-9_]+>", generated_sql): # Check for placeholders in the SQL itself
+        # FIX: Ensure generated_sql is a string before using regex to prevent TypeError.
+        elif generated_sql and re.search(r"<[a-zA-Z0-9_]+>", generated_sql):
             return "PlaceholderSyntaxError"
         elif "rejected by firewall" in error_lower:
             return "FirewallRejection"
@@ -1182,7 +1174,7 @@ class ErrorRemediationAgent:
         return suggestion
 
     def run(self, error_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
-        print(f"\n--- [MONITOR] Error Remediation Agent: Handling error: {error_message} ---")
+        print(f"\n--- [MONITOR] Error Remediation Agent: Handling error: {error_message} ---\n")
 
         generated_sql = current_state.get('generated_sql', '')
         error_type = self.classify_error(error_message, generated_sql)
@@ -1190,66 +1182,93 @@ class ErrorRemediationAgent:
 
         current_state['remediation_suggestion'] = remediation_suggestion
         current_state['error_type'] = error_type
-        current_state['error_message'] = error_message # Update with specific error message
+        current_state['error_message'] = error_message
 
-        # This flag is now effectively unused for routing, but kept for consistency if needed for logging
-        # We always end after remediation in this flow.
         current_state['re_attempt_sql_generation'] = False 
         print(f"   [Action] Error remediation details logged. Process will now terminate.")
 
         print(f"--- [MONITOR] Error Remediation Agent: Remediation complete. ---\n")
         return current_state
 
-# 4.9. 🔹 SQL Generator Agent (Re-implemented for multi-query support)
+# 4.9. 🔹 SQL Generator Agent (Using a direct LLMChain for local models)
 class SQLGeneratorAgent:
     """
-    Generates SQL queries using LangChain's SQL Agent.
+    Generates a SQL query using a local text-generation model via an LLMChain.
+    This approach is more reliable for models not fine-tuned for tool-calling.
     """
     def __init__(self, model_manager: ModelManager, db: SQLDatabase):
-        self.llm_for_agent = model_manager.get('chat_llm')
+        # Use the local reasoning_llm (Gemma)
+        self.llm = model_manager.get('reasoning_llm')
         self.db = db
-        self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm_for_agent)
-        self.tools = self.toolkit.get_tools()
-        self.prompt_template = hub.pull("langchain-ai/sql-agent-system-prompt")
-        print("SQLGeneratorAgent initialized.")
+        
+        # This prompt is specifically engineered for a text-generation model.
+        # It clearly instructs the model on its role, the context, and the expected output format.
+        prompt_template = """
+<|begin_of_text|>
+<|start_header_id|>system<|end_header_id|>
+You are an expert SQLite programmer. Your sole purpose is to generate a single, valid SQLite query based on the provided schema and user question.
+- Do NOT generate any text, explanation, or markdown before or after the SQL query.
+- Your response must ONLY be the SQL query.
+- The schema is provided below, with tables, columns, and relationships.
+
+<|start_header_id|>user<|end_header_id|>
+**Database Schema:**
+{schema}
+
+**User Question:**
+{query}
+
+<|start_header_id|>assistant<|end_header_id|>```sql
+"""
+        
+        # Using ChatPromptTemplate for consistency, though a standard PromptTemplate would also work here.
+        prompt = ChatPromptTemplate.from_template(prompt_template)
+        
+        # FIX: Corrected the typo from 'llum' to 'llm'
+        self.llm_chain = LLMChain(prompt=prompt, llm=self.llm)
+        print("SQLGeneratorAgent initialized with a direct LLMChain.")
 
     def run(self, compressed_schema: str, query: str) -> Tuple[Optional[str], Optional[float]]:
         """
-        Generates a SQL query for a given query and compressed schema.
-        Returns the generated SQL and a confidence score.
+        Generates a SQL query by invoking the LLMChain.
         """
         print(f"   [Info] SQLGeneratorAgent: Generating SQL for query: '{query}'")
-        system_message = self.prompt_template.format(dialect=CONFIG['db_dialect'], top_k=5)
-        agent_executor = create_react_agent(self.llm_for_agent, self.tools, prompt=system_message)
         
-        full_query_with_context = f"Based on this schema:\n{compressed_schema}\n\nUser Question: {query}"
-
-        generated_sql_content = None
         try:
-            events = agent_executor.stream(
-                {"messages": [("user", full_query_with_context)]},
-                stream_mode="values",
-            )
-            for event in events:
-                if "messages" in event:
-                    for message in event["messages"]:
-                        if message.type == "tool_call" and message.name == "sql_db_query":
-                            if message.args and "query" in message.args:
-                                generated_sql_content = message.args["query"]
-                                print(f"   [Info] SQLGeneratorAgent Captured SQL: {generated_sql_content}")
-                                break
-                if generated_sql_content:
-                    break
+            # Invoke the chain with the schema and query
+            response = self.llm_chain.invoke({
+                "schema": compressed_schema,
+                "query": query
+            })
             
-            if generated_sql_content:
-                return generated_sql_content, 0.95 # Assume high confidence if SQL is generated
+            # The response dictionary contains the generated text under the 'text' key
+            generated_sql = response.get('text', '').strip()
+            
+            # Clean up the output to ensure it's just the SQL
+            if "```" in generated_sql:
+                # Extract content between markdown code blocks
+                sql_match = re.search(r"```sql\n(.*?)\n```", generated_sql, re.DOTALL)
+                if sql_match:
+                    generated_sql = sql_match.group(1).strip()
+
+            # Ensure the query ends with a semicolon for consistency
+            if generated_sql and not generated_sql.endswith(';'):
+                generated_sql += ';'
+                
+            # A final cleanup to remove any potential leading characters before SELECT
+            if generated_sql and "SELECT" in generated_sql:
+                generated_sql = "SELECT" + generated_sql.split("SELECT", 1)[1]
+
+            if generated_sql:
+                print(f"   [Info] SQLGeneratorAgent Captured SQL: {generated_sql}")
+                return generated_sql, 0.90
             else:
                 print("   [Warning] SQLGeneratorAgent did not produce a valid SQL query.")
-                return None, 0.1 # Low confidence if no SQL generated
+                return None, 0.1
 
         except Exception as e:
             print(f"   [ERROR] SQLGeneratorAgent execution failed: {e}")
-            return None, 0.0 # Zero confidence on error
+            return None, 0.0
 
 
 # 5. REFINED TESTING ORCHESTRATOR (Corrected & Enhanced)
