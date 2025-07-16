@@ -223,6 +223,70 @@ model_manager.get('spacy_model')
 print("\n--- ✅ Step 3 Complete: All models are loaded and cached.---\n")
 
 
+# Function to adapt SQL for dialect
+def adapt_sql_for_dialect(sql_query: str, db_dialect: str) -> str:
+    """
+    Applies dialect-specific quoting to identifiers (table/column names) that
+    match reserved SQL keywords, while leaving others untouched.
+
+    Args:
+        sql_query (str): The raw SQL query.
+        db_dialect (str): Target database dialect ('sqlite', 'mysql', 'postgresql', etc.)
+
+    Returns:
+        str: Modified SQL query with necessary quoting.
+    """
+
+    # List of reserved keywords
+    RESERVED_KEYWORDS = {
+        "SELECT", "FROM", "WHERE", "JOIN", "ON", "AND", "OR", "GROUP", "BY",
+        "ORDER", "LIMIT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
+        "PRAGMA", "WITH", "COUNT", "SUM", "AVG", "MIN", "MAX", "AS", "DISTINCT",
+        "NULL", "TRUE", "FALSE", "IN", "LIKE", "IS", "NOT", "BETWEEN", "HAVING",
+        "CASE", "WHEN", "THEN", "ELSE", "END", "UNION", "ALL", "EXISTS", "TOP",
+        "OFFSET", "FETCH", "NEXT", "ONLY", "ROW", "ROWS", "CURRENT", "DATE",
+        "TIME", "TIMESTAMP", "INTERVAL", "CHARACTER", "VARYING", "DECIMAL",
+        "NUMERIC", "REAL", "FLOAT", "DOUBLE", "PRECISION", "BOOLEAN", "TEXT",
+        "BLOB", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "CONSTRAINT", "DEFAULT",
+        "CHECK", "UNIQUE", "INDEX", "VIEW", "TRIGGER", "PROCEDURE", "FUNCTION",
+        "BEGIN", "END", "TRANSACTION", "COMMIT", "ROLLBACK", "SAVEPOINT", "DESC", "ASC"
+    }
+
+    def quote_identifier(identifier: str) -> str:
+        # Only quote if identifier matches a reserved keyword (case-insensitive)
+        # AND it's not one of the primary SQL command keywords that should never be quoted.
+        # This function is primarily for quoting identifiers (table/column names)
+        # that might clash with keywords.
+        if identifier != identifier.upper() and identifier.upper() in RESERVED_KEYWORDS:
+            if db_dialect == 'mysql':
+                return f"`{identifier}`"
+            elif db_dialect in ('postgresql', 'oracle'):
+                return f'"{identifier}"'
+            elif db_dialect == 'sqlserver':
+                return f"[{identifier}]"
+            elif db_dialect == 'sqlite':
+                return f'"{identifier}"'
+        return identifier  # Return original if not a reserved keyword or if it's a primary command keyword
+
+    # Extract and temporarily remove string literals
+    string_literals = re.findall(r"'[^']*'", sql_query)
+    placeholder_map = {f"__STRING_LITERAL_{i}__": lit for i, lit in enumerate(string_literals)}
+    temp_sql = sql_query
+    for i, lit in enumerate(string_literals):
+        temp_sql = temp_sql.replace(lit, f"__STRING_LITERAL_{i}__", 1)
+
+    # Regex for identifiers (excluding numeric literals)
+    identifier_pattern = re.compile(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b')
+
+    # Apply quoting only to identifiers that are SQL keywords
+    quoted_sql = identifier_pattern.sub(lambda m: quote_identifier(m.group(0)), temp_sql)
+
+    # Restore string literals
+    for placeholder, lit in placeholder_map.items():
+        quoted_sql = quoted_sql.replace(placeholder, lit)
+
+    return quoted_sql
+
 # 4. AGENT BREAKDOWN
 # 4.1. 🔹 Schema Extractor Agent (Upgraded with Semantic Type Inference and SQLDatabase)
 class SchemaExtractorAgent:
@@ -684,8 +748,9 @@ Output your response in a structured JSON format with a list of tables, their re
 # 4.3. 🔹 Relationship Mapper Agent (Enhanced with BGE-M3 Integration and Column Pruning)
 class RelationshipMapperAgent:
     """
-    Identifies joins (explicit and semantic) and prunes schema with detailed internal logging.
+    Identifies joins (explicit) and prunes schema with detailed internal logging.
     Incorporates enhanced column selection logic and suggests GROUP BY columns for aggregation.
+    This agent now relies *solely* on the 'relationships' node from the schema for joins.
     """
     def __init__(self, full_schema_path: str, model_manager: ModelManager, semantic_join_threshold: float, semantic_column_threshold: float):
         with open(full_schema_path, 'r') as f:
@@ -758,15 +823,18 @@ class RelationshipMapperAgent:
         """
         Finds a path of joins between two tables using BFS.
         Returns a list of table names in the path, or None if no path exists.
+        This method will now only consider explicit relationships for pathfinding.
         """
         graph = {}
         for rel in relationships:
-            from_tbl = rel['from_table']
-            to_tbl = rel['to_table']
-            if from_tbl not in graph: graph[from_tbl] = []
-            if to_tbl not in graph: graph[to_tbl] = []
-            graph[from_tbl].append(to_tbl)
-            graph[to_tbl].append(from_tbl) # Assuming joins are bidirectional for pathfinding
+            # Only consider explicit relationships for pathfinding
+            if rel.get('type') == 'explicit':
+                from_tbl = rel['from_table']
+                to_tbl = rel['to_table']
+                if from_tbl not in graph: graph[from_tbl] = []
+                if to_tbl not in graph: graph[to_tbl] = []
+                graph[from_tbl].append(to_tbl)
+                graph[to_tbl].append(from_tbl) # Assuming joins are bidirectional for pathfinding
 
         queue = deque([(start_table, [start_table])])
         visited = {start_table}
@@ -795,11 +863,16 @@ class RelationshipMapperAgent:
         return sorted(list(values), key=str)[:5] # Limit to top 5 distinct values for brevity
 
     def _get_join_path(self, start_table: str, end_table: str, relationships: List[Dict]) -> List[Dict]:
-        """Finds optimal join path using Dijkstra's algorithm"""
+        """
+        Finds optimal join path using Dijkstra's algorithm.
+        This method will now only consider explicit relationships for pathfinding.
+        """
         graph = defaultdict(list)
         for rel in relationships:
-            graph[rel['from_table']].append((rel['to_table'], rel))
-            graph[rel['to_table']].append((rel['from_table'], rel))
+            # Only consider explicit relationships for pathfinding
+            if rel.get('type') == 'explicit':
+                graph[rel['from_table']].append((rel['to_table'], rel))
+                graph[rel['to_table']].append((rel['from_table'], rel))
         
         # Dijkstra's algorithm implementation
         queue = [(0, start_table, [])]
@@ -849,7 +922,7 @@ class RelationshipMapperAgent:
             print(f"      - Processing Table: '{table_name}'")
 
             # Keep PKs and descriptive columns by default
-            for col_name in info['column_names_ordered']:\
+            for col_name in info['column_names_ordered']:
                 # Always keep PKs
                 if col_name in info['primary_keys']:
                     kept_cols.add(col_name)
@@ -933,81 +1006,25 @@ class RelationshipMapperAgent:
                     print(f"        - Column '{col_name}': Pruned.\n")
 
 
-        # --- Detect Explicit Foreign Key Relationships ---
-        print("   [Info] Detecting explicit foreign key relationships.\n")
+        # --- Detect Explicit Foreign Key Relationships (Single Source of Truth) ---
+        # This section now exclusively uses the 'relationships' node from the schema.
+        print("   [Info] Detecting explicit foreign key relationships from schema_cache.json 'relationships' node.\n")
         for rel in self.full_schema.get('relationships', []):
             from_tbl = rel['from_table'].lower()
             to_tbl = rel['to_table'].lower()
 
+            # Only add relationships if both tables are selected for the current query
             if from_tbl in selected_tables and to_tbl in selected_tables:
-                detected_relationships.append({**rel, "confidence": 0.95, "type": "explicit"}) # Assign high confidence
+                # The type is always 'explicit' as we are only using the pre-defined relationships
+                detected_relationships.append({**rel, "confidence": 1.0, "type": "explicit"}) # Assign high confidence
                 join_plan_visual.append(f"[{from_tbl}] ←{rel['from_column']}→ [{to_tbl}]")
-                print(f"      ✅ Explicit Join Detected: {from_tbl}.{rel['from_column']} = {to_tbl}.{rel['to_column']} (Confidence: 0.95)\n")
+                print(f"      ✅ Explicit Join Detected: {from_tbl}.{rel['from_column']} = {to_tbl}.{rel['to_column']} (Confidence: 1.0)\n")
 
-        # --- Relationship Mapper's BGE-M3 Integration (Semantic Joins & Multi-hop) ---
-        print("   [Info] Checking for semantic joins using BGE-M3 and multi-hop paths.\n")
-        candidate_tables_for_semantic_join = list(minimal_schema.keys())
+        # --- Removed: Semantic Join Detection Logic ---
+        # The previous semantic join detection logic using BGE-M3 and multi-hop paths
+        # has been removed as per the user's request to rely solely on explicit relationships.
         
-        # Build a graph of existing relationships for multi-hop pathfinding
-        existing_relationship_graph = {}
-        for rel in detected_relationships:
-            if rel['type'] == 'explicit':
-                from_tbl, to_tbl = rel['from_table'], rel['to_table']
-                if from_tbl not in existing_relationship_graph: existing_relationship_graph[from_tbl] = set()
-                if to_tbl not in existing_relationship_graph: existing_relationship_graph[to_tbl] = set()
-                existing_relationship_graph[from_tbl].add(to_tbl)
-                existing_relationship_graph[to_tbl].add(from_tbl) # Assuming bidirectional for pathfinding
-
-        for i in range(len(candidate_tables_for_semantic_join)):
-            for j in range(i + 1, len(candidate_tables_for_semantic_join)):
-                table1_name = candidate_tables_for_semantic_join[i]
-                table2_name = candidate_tables_for_semantic_join[j]
-
-                # Skip if an explicit join already exists or a path is already found
-                if self._find_join_paths(table1_name, table2_name, detected_relationships):
-                    continue
-
-                table1_cols = self.full_schema['tables'][table1_name]['column_names_ordered']
-                table2_cols = self.full_schema['tables'][table2_name]['column_names_ordered']
-
-                best_semantic_score = 0.0
-                best_col_pair = (None, None)
-
-                for col1_name in table1_cols:
-                    for col2_name in table2_cols:
-                        if col1_name == col2_name: # Avoid self-comparison, but allow same name, different table
-                            # Check for implicit relationships by common ID/name patterns
-                            if (col1_name.endswith('_id') and col2_name.endswith('_id')) or \
-                               (col1_name.endswith('_name') and col2_name.endswith('_name')):\
-                                # Assign a moderate confidence for implicit matches
-                                implicit_score = 0.75
-                                if implicit_score > best_semantic_score:
-                                    best_semantic_score = implicit_score
-                                    best_col_pair = (col1_name, col2_name)
-                                    print(f"      [Info] Implicit relationship candidate: {table1_name}.{col1_name} and {table2_name}.{col2_name}\n")
-                                continue
-
-                        desc1 = self._get_column_description(table1_name, col1_name)
-                        desc2 = self._get_column_description(table2_name, col2_name)
-
-                        embeddings = self.embedding_model.encode([desc1, desc2], convert_to_tensor=True, show_progress_bar=False)
-                        sim_score = util.pytorch_cos_sim(embeddings[0], embeddings[1]).item()
-
-                        if sim_score > best_semantic_score:
-                            best_semantic_score = sim_score
-                            best_col_pair = (col1_name, col2_name)
-
-                if best_semantic_score > self.semantic_join_threshold and best_col_pair[0] is not None:
-                    semantic_rel = {
-                        "from_table": table1_name, "from_column": best_col_pair[0],
-                        "to_table": table2_name, "to_column": best_col_pair[1],
-                        "type": "semantic_suggested", "confidence": best_semantic_score
-                    }
-                    detected_relationships.append(semantic_rel)
-                    join_plan_visual.append(f"[{table1_name}] ≈{best_semantic_score:.2f}≈ [{table2_name}] (via {best_col_pair[0]}/{best_col_pair[1]})\n")
-                    print(f"      ✅ Semantic Join Suggested: {table1_name}.{best_col_pair[0]} ≈ {table2_name}.{best_col_pair[1]} (Score: {best_semantic_score:.4f})\n")
-        
-        final_join_plan_str = "\n".join(join_plan_visual) if join_plan_visual else "No explicit or semantic joins detected."
+        final_join_plan_str = "\n".join(join_plan_visual) if join_plan_visual else "No explicit joins detected among selected tables."
         
         indented_schema = json.dumps(minimal_schema, indent=2).replace('\n', '\n      ')
         print(f"\n   [Output] Final Pruned Schema:\n      {indented_schema}")
@@ -1074,11 +1091,8 @@ class SchemaCompressorAgent:
         if relationships:
             compressed_schema_str += "\\n\\n/* RELATIONSHIPS */\\n"
             for rel in relationships:
-                if rel.get('type') == 'semantic_suggested':
-                    compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']} (Semantic Confidence: {rel['confidence']:.2f})\\n"
-                else:
-                    # For explicit FK relationships, just state the join as requested.
-                    compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']}\\n"
+                # Only explicit relationships are passed to the compressor now
+                compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']}\\n"
         
         if suggested_group_by_columns:
             compressed_schema_str += "\\n/* AGGREGATION HINTS */\\n"
@@ -1154,7 +1168,7 @@ def adapt_sql_for_dialect(sql_query: str, db_dialect: str) -> str:
 
     # Restore string literals
     for placeholder, lit in placeholder_map.items():
-        quoted_sql = quoted_query = quoted_sql.replace(placeholder, lit)
+        quoted_sql = quoted_sql.replace(placeholder, lit)
 
     return quoted_sql
 
@@ -1369,7 +1383,9 @@ You are an expert SQLite programmer. Your sole purpose is to generate a single, 
                 generated_sql = "SELECT" + generated_sql.split("SELECT", 1)[1]
 
             if generated_sql:
-                print(f"   [Info] SQLGeneratorAgent Captured SQL: {generated_sql}")
+                # Adapt the generated SQL for the specific database dialect
+                adapted_sql = adapt_sql_for_dialect(generated_sql, CONFIG["db_dialect"])
+                print(f"   [Info] SQLGeneratorAgent Captured SQL: {adapted_sql}")
                 return generated_sql, 0.90
             else:
                 print("   [Warning] SQLGeneratorAgent did not produce a valid SQL query.")
@@ -1806,8 +1822,8 @@ def run_db_agent(query: str):
 
 # --- Define Test Queries ---
 TEST_QUERIES = [
-    "Who are the most frequent customers?",
-    "List all customers with their email and phone?",
+    # "Who are the most frequent customers?",
+   #  "List all customers with their email and phone?",
     "Which customer placed the highest total order amount?",
     "Which customers made purchases in the last 7 days?",
     "How many customers have placed more than one order?", 
