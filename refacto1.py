@@ -287,6 +287,25 @@ def adapt_sql_for_dialect(sql_query: str, db_dialect: str) -> str:
 
     return quoted_sql
 
+
+# Define the AgentState for LangGraph
+class AgentState(TypedDict):
+    """
+    State for the multi-agent SQL generation and execution pipeline.
+    """
+    query: str
+    query_history: List[str]
+    context: str
+    sql_query: str
+    db_result: str
+    llm_reasoning: str
+    intermediate_steps: List[Any]
+    current_attempt: int
+    error_message: Optional[str]
+    remediation_advice: Optional[str]
+    sub_queries: List[str]
+    results: List[Dict]
+
 # 4. AGENT BREAKDOWN
 # 4.1. 🔹 Schema Extractor Agent (Upgraded with Semantic Type Inference and SQLDatabase)
 class SchemaExtractorAgent:
@@ -531,10 +550,10 @@ If the query SHOULD be split:
             raw_llm_response = raw_llm_response.content
 
         try:
-            # Extract JSON from the LLM's raw response
-            match = re.search(r'\{.*\}', raw_llm_response, re.DOTALL)
+            # FIXED: Using a more robust, non-greedy regex to prevent JSON decoding errors from trailing text.
+            match = re.search(r'(\{.*?\})', raw_llm_response, re.DOTALL)
             if match:
-                json_str = match.group(0)
+                json_str = match.group(1)
                 llm_decision = json.loads(json_str)
             else:
                 print(f"   [Warning] LLM response did not contain valid JSON for splitting. Assuming no split. Raw: {raw_llm_response[:200]}...")
@@ -598,12 +617,22 @@ class TableSelectorAgent:
                 tokens.add(token.lemma_)
         return tokens
 
-    def _get_llm_table_reasoning_prompt(self, query: str) -> str:
+    def _get_llm_table_reasoning_prompt(self, query: str, remediation_advice: Optional[str] = None) -> str:
         """Generates a prompt for the LLM to select relevant tables."""
         schema_summary = "\n".join([
             f"- {table_name}: {', '.join(self.full_schema['tables'][table_name]['columns'].keys())}"
             for table_name in self.table_names
         ])
+        
+        remediation_block = ""
+        if remediation_advice:
+            remediation_block = f"""
+<PriorAttemptCorrection>
+The previous attempt failed. Use the following advice to improve your table selection:
+<Suggestion>{remediation_advice}</Suggestion>
+</PriorAttemptCorrection>
+"""
+
         prompt = f"""<Instructions>
 You are an expert database schema analyst. Given a user question and the available database tables with their columns, identify the MOST relevant tables required to answer the question.
 For each table, provide a brief reasoning for its inclusion or exclusion and a confidence score (0.0 to 1.0).
@@ -611,7 +640,7 @@ Prioritize tables that directly contain keywords or are strongly semantically re
 If a table is a foreign key, only include it if explicitly needed for a join or filtering based on its descriptive columns.
 Output your response in a structured JSON format with a list of tables, their reasoning, and confidence.
 </Instructions>
-
+{remediation_block}
 <AvailableTables>
 {schema_summary}
 </AvailableTables>
@@ -681,19 +710,20 @@ Output your response in a structured JSON format with a list of tables, their re
         
         return table_scores
 
-    def run(self, query: str) -> List[str]:
+    def run(self, query: str, remediation_advice: Optional[str] = None) -> List[str]:
         print("\n--- [MONITOR] Table Selector Agent: Starting table selection ---")
 
         # --- LLM-based Table Reasoning ---
-        print("   [Info] Attempting LLM-based table reasoning...") # Moved this print statement
-        prompt = self._get_llm_table_reasoning_prompt(query)
+        print("   [Info] Attempting LLM-based table reasoning...")
+        prompt = self._get_llm_table_reasoning_prompt(query, remediation_advice)
         raw_llm_response = self.reasoning_llm.invoke(prompt)
         if hasattr(raw_llm_response, 'content'):
             raw_llm_response = raw_llm_response.content
         
+        # ... (rest of the run method remains unchanged) ...
         llm_selections = self._parse_llm_response(raw_llm_response)
         
-        llm_proposed_table_names = set() # Changed name to reflect all proposed tables
+        llm_proposed_table_names = set()
         print("   [Decision] LLM Table Reasoning Results:")
         for item in llm_selections:
             table_name = item.get('table')
@@ -702,9 +732,7 @@ Output your response in a structured JSON format with a list of tables, their re
             
             if table_name and table_name.lower() in self.table_names:
                 print(f"      - Table '{table_name}': Confidence: {confidence:.2f}, Reason: {reasoning}")
-                # Always add to llm_proposed_table_names if valid, regardless of confidence
                 llm_proposed_table_names.add(table_name.lower())
-                # Still print if it meets threshold for debugging/info
                 if confidence >= self.llm_threshold:
                     print(f"        ✅ Meets LLM Threshold (Confidence: {confidence:.2f} >= {self.llm_threshold})")
                 else:
@@ -715,11 +743,9 @@ Output your response in a structured JSON format with a list of tables, their re
         final_selected_tables = []
 
         if llm_proposed_table_names:
-            # If LLM proposed any tables, use them (regardless of individual confidence)
             final_selected_tables = sorted(list(llm_proposed_table_names))
             print(f"   [Decision] LLM proposed tables. Using LLM selections: {final_selected_tables}")
         else:
-            # Only engage embedding fallback if LLM failed to propose any tables
             print("   [Info] LLM did not propose any tables. Engaging embedding fallback.")
             embedding_scores = self._embedding_fallback(query)
             embedding_selected_table_names = set()
@@ -729,14 +755,10 @@ Output your response in a structured JSON format with a list of tables, their re
                 if score >= self.embedding_threshold:
                     embedding_selected_table_names.add(table_name.lower())
                     print(f"        ✅ Selected by Embedding (Score: {score:.4f} >= {self.embedding_threshold})")
-                else:
-                    print(f"        ❌ Rejected by Embedding (Score: {score:.4f} < {self.embedding_threshold})")
             
             if embedding_selected_table_names:
                 final_selected_tables = sorted(list(embedding_selected_table_names))
-                print(f"   [Decision] Using embedding selections: {final_selected_tables}")
             else:
-                # Fallback to all tables if both LLM and embedding are empty
                 final_selected_tables = self.table_names
                 print("   [Warning] No tables selected by LLM or embedding. Defaulting to all tables for broad search.")
 
@@ -1095,11 +1117,11 @@ class SchemaCompressorAgent:
                 compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']}\\n"
         
         if suggested_group_by_columns:
-            compressed_schema_str += "\\n/* AGGREGATION HINTS */\\n"
+            compressed_schema_str += "\\n\\n/* AGGREGATION HINTS */\\n"
             compressed_schema_str += f"Query might require GROUP BY on: {', '.join(suggested_group_by_columns)}\\n"
 
         if suggested_filter_values:
-            compressed_schema_str += "\\n/* FILTERING HINTS (Sample Values) */\\n"
+            compressed_schema_str += "\\n\\n/* FILTERING HINTS (Sample Values) */\\n"
             for col, values in suggested_filter_values.items():
                 compressed_schema_str += f"- {col}: {', '.join(map(str, values))}\\n"
 
@@ -1253,140 +1275,220 @@ class HumanInTheLoopAgent:
 # 4.8. 🔹 Error Classification & Remediation Agent
 class ErrorRemediationAgent:
     """
-    Classifies SQL execution errors and suggests remediation steps.
-    This agent will now primarily log the error and end the process, as the LangChain SQL Agent
-    will handle internal remediation attempts.
+    Classifies SQL execution errors and suggests which agent to retry.
     """
     def __init__(self, model_manager: ModelManager):
         self.reasoning_llm = model_manager.get('reasoning_llm')
-        print("ErrorRemediationAgent initialized.")
+        self.max_attempts = 2
+        print("✅ ErrorRemediationAgent initialized.")
 
     def classify_error(self, error_message: str, generated_sql: str) -> str:
-        error_lower = error_message.lower()
-        if "group by" in error_lower:
-            return "MissingGroupBy"
-        elif "ambiguous" in error_lower:
-            return "AmbiguousColumn"
-        elif "no such column" in error_lower:
-            return "MissingColumn"
-        elif "syntax error" in error_lower:
-            return "SyntaxError"
-        # FIX: Ensure generated_sql is a string before using regex to prevent TypeError.
-        elif generated_sql and re.search(r"<[a-zA-Z0-9_]+>", generated_sql):
-            return "PlaceholderSyntaxError"
-        elif "rejected by firewall" in error_lower:
-            return "FirewallRejection"
-        elif "rejected by human" in error_lower:
-            return "HumanRejection"
-        return "UnknownError"
+        # Placeholder for LLM-driven classification
+        if "no such table" in error_message.lower() or "no such column" in error_message.lower():
+            return "MissingTableOrColumn"
+        if "syntax error" in error_message.lower() or "near " in error_message.lower():
+            return "SQLSyntaxError"
+        if "cannot find a path" in error_message.lower():
+            return "RelationshipError"
+        return "UnclassifiedError"
 
     def suggest_remediation(self, error_type: str, context: Dict[str, Any]) -> str:
-        remediation_map = {
-            "MissingGroupBy": "Re-prompt with emphasis on GROUP BY requirements",
-            "AmbiguousColumn": "Qualify column names with table aliases",
-            "MissingColumn": "Re-examine schema for valid columns",
-            "SyntaxError": "Re-generate with strict syntax checking",
-            "PlaceholderSyntaxError": "Re-prompt SQL Generator Agent with explicit instructions to replace placeholders with actual values or infer them.",
-            "FirewallRejection": "Review firewall rules or adjust query to comply with security policies.",
-            "HumanRejection": "User explicitly rejected the generated SQL. Manual intervention required.",
-            "DatabaseAccessError": "Retry execution after a short delay or alert administrator.",
-            "UnknownError": "No specific automated remediation. Requires manual review."
-        }
-        suggestion = remediation_map.get(error_type, "No specific automated remediation. Requires manual review.")
-        print(f"   [Remediation] Error Type: '{error_type}'. Suggestion: {suggestion}")
-        return suggestion
+        """Suggests which agent to re-run based on the error type."""
+        if error_type == "MissingTableOrColumn":
+            return "Re-run the Table Selection and Relationship Mapping agents to ensure all required tables and columns are selected."
+        if error_type == "SQLSyntaxError":
+            return "Re-run the SQL Generator agent to correct the query syntax."
+        if error_type == "RelationshipError":
+            return "Re-run the Relationship Mapping agent to find a valid join path."
+        return "No specific remediation path. Re-run SQL Generator as a default retry."
 
-    def run(self, error_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
-        print(f"\n--- [MONITOR] Error Remediation Agent: Handling error: {error_message} ---\n")
+    def _get_remediation_prompt(self, error_message: str, generated_sql: str, schema_context: str, query_history: str) -> str:
+        """Generates a prompt for the LLM to suggest remediation."""
+        prompt = f"""<Instructions>
+You are an expert SQL query debugger and database analyst. An agent has attempted to generate and execute an SQL query, but it failed with an error. Your task is to analyze the error and provide clear, concise remediation advice to help the agent correct its approach for the next attempt.
+Focus on identifying the root cause of the error (e.g., non-existent column, incorrect table name, syntax error, missing join) and suggest a concrete fix.
+</Instructions>
 
-        generated_sql = current_state.get('generated_sql', '')
-        error_type = self.classify_error(error_message, generated_sql)
-        remediation_suggestion = self.suggest_remediation(error_type, current_state)
+<UserQueryHistory>
+{query_history}
+</UserQueryHistory>
 
-        current_state['remediation_suggestion'] = remediation_suggestion
-        current_state['error_type'] = error_type
-        current_state['error_message'] = error_message
+<GeneratedSQL>
+{generated_sql}
+</GeneratedSQL>
 
-        current_state['re_attempt_sql_generation'] = False 
-        print(f"   [Action] Error remediation details logged. Process will now terminate.")
+<SchemaContext>
+{schema_context}
+</SchemaContext>
 
-        print(f"--- [MONITOR] Error Remediation Agent: Remediation complete. ---\n")
-        return current_state
+<ErrorMessage>
+{error_message}
+</ErrorMessage>
+
+<ExampleOutput>
+{{
+  "error_type": "InvalidColumn",
+  "reasoning": "The query uses a column 'order_date_time' which does not exist. The correct column is 'order_date'.",
+  "remediation_advice": "Check the schema for the correct column name. Re-run the Table Selection and Column Selection agents to ensure the correct columns are chosen."
+}}
+</ExampleOutput>
+
+<Response>
+"""
+        return prompt
+
+    
+
+    def run(self, state: AgentState) -> AgentState:
+        """
+        Analyzes the error and returns a state with remediation advice.
+        """
+        print("\n--- [MONITOR] Error Remediation Agent: Classifying error and generating advice ---")
+        error_message = state['error_message']
+        generated_sql = state['sql_query']
+        query_history = "\n".join(state['query_history'])
+        schema_context = state['context']
+        
+        prompt = self._get_remediation_prompt(error_message, generated_sql, schema_context, query_history)
+        raw_llm_response = self.reasoning_llm.invoke(prompt)
+        
+        remediation_advice = "No specific advice could be generated."
+        
+        try:
+            advice_json = json.loads(re.search(r'\{.*\}', raw_llm_response.content, re.DOTALL).group(0))
+            remediation_advice = advice_json.get("remediation_advice", remediation_advice)
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"   [Warning] Failed to parse LLM remediation response: {e}. Raw: {raw_llm_response.content[:200]}...")
+        
+        print(f"   [Decision] Remediation Advice: {remediation_advice}")
+        state['remediation_advice'] = remediation_advice
+        
+        return state
 
 # 4.9. 🔹 SQL Generator Agent (Using a direct LLMChain for local models)
+# 4.9. 🔹 SQL Generator Agent (Using your proven prompt and cleaning logic)
 class SQLGeneratorAgent:
     """
-    Generates a SQL query using a local text-generation model via an LLMChain.
-    This approach is more reliable for models not fine-tuned for tool-calling.
+    Generates a SQL query using a direct LLM call with a custom XML-style prompt
+    and a robust cleaning function.
     """
     def __init__(self, model_manager: ModelManager, db: SQLDatabase):
-        # Use the local reasoning_llm (Gemma)
-        self.llm = model_manager.get('reasoning_llm')
-        self.db = db
+        # We only need the reasoning_llm for a direct invocation
+        self.reasoning_llm = model_manager.get('reasoning_llm')
+        print("SQLGeneratorAgent initialized with custom prompt and cleaning logic.")
+
+    # FIXED: This is your prompt function, now modified to accept and inject remediation_advice
+    def _get_sql_generation_prompt(self, compressed_schema: str, query: str, remediation_advice: Optional[str] = None) -> str:
         
-        # This prompt is specifically engineered for a text-generation model.
-        # It clearly instructs the model on its role, the context, and the expected output format.
-        prompt_template = """
-<|begin_of_text|>
-<|start_header_id|>system<|end_header_id|>
-You are an expert SQLite programmer. Your sole purpose is to generate a single, valid SQLite query based on the provided schema and user question.
-- Do NOT generate any text, explanation, or markdown before or after the SQL query.
-- Your response must ONLY be the SQL query.
-- The schema is provided below, with tables, columns, and relationships.
-
-<|start_header_id|>user<|end_header_id|>
-**Database Schema:**
-{schema}
-
-**User Question:**
-{query}
-
-<|start_header_id|>assistant<|end_header_id|>```sql
+        remediation_block = ""
+        if remediation_advice:
+            # This is the XML block for remediation advice, added only on retry attempts
+            remediation_block = f"""
+<PriorAttemptCorrection>
+The previous attempt failed. Use the following advice to improve your query:
+<Suggestion>{remediation_advice}</Suggestion>
+</PriorAttemptCorrection>
 """
-        
-        # Using ChatPromptTemplate for consistency, though a standard PromptTemplate would also work here.
-        prompt = ChatPromptTemplate.from_template(prompt_template)
-        
-        # FIX: Corrected the typo from 'llum' to 'llm'
-        self.llm_chain = LLMChain(prompt=prompt, llm=self.llm)
-        print("SQLGeneratorAgent initialized with a direct LLMChain.")
 
-    def run(self, compressed_schema: str, query: str) -> Tuple[Optional[str], Optional[float]]:
+        return f"""<Instructions>
+You are an expert SQLite analyst. Your task is to write a single, valid, and efficient SQLite query to answer the user's question based on the provided schema.
+- Use ONLY the tables and columns listed in the <Schema> section. Do not hallucinate table or column names.
+- **IMPORTANT**: If a table or column name is a SQL reserved keyword (e.g., "order"), enclose it in square brackets (e.g., [order]).
+- Pay close attention to the user's question to correctly apply constraints like `LIMIT`, `ORDER BY`, and `WHERE` clauses.
+- If the query implies aggregation (e.g., "count", "average", "sum"), use appropriate SQL aggregate functions and `GROUP BY` clauses if necessary.
+- Output ONLY the raw SQL query, with no additional text, explanations, or markdown.
+</Instructions>
+{remediation_block}
+<Schema>
+{compressed_schema}
+</Schema>
+
+<Question>
+{query}
+</Question>
+
+<SQL>"""
+
+    # This is your robust cleaning function, kept exactly as provided.
+    def _clean_generated_sql(self, raw_sql: str) -> str:
         """
-        Generates a SQL query by invoking the LLMChain.
+        Cleans the raw SQL response from the LLM to ensure it contains only a single,
+        valid SQL statement, handling various termination patterns and irrelevant characters.
+        """
+        # Step 1: Remove common LLM artifacts like markdown code blocks and </s>
+        cleaned_sql = raw_sql.replace("```sql", "").replace("```", "").strip()
+        cleaned_sql = cleaned_sql.replace("</s>", "").strip()
+
+        extracted_sql = "" # Initialize extracted_sql to an empty string
+
+        # Priority 1: Extract content within <SQL>...</SQL> tags
+        sql_tag_match = re.search(r"<SQL>(.*?)</SQL>", cleaned_sql, re.IGNORECASE | re.DOTALL)
+        if sql_tag_match:
+            extracted_sql = sql_tag_match.group(1).strip()
+            print(f"   [Clean] Extracted SQL from <SQL> tags: '{extracted_sql}'")
+        else:
+            print("   [Clean] No <SQL> tags found. Proceeding with other termination patterns.")
+            # Priority 2: Look for </SQL> or ; as explicit terminators
+            end_sql_tag_index = cleaned_sql.upper().find("</SQL>")
+            semicolon_index = cleaned_sql.find(";")
+
+            # Determine the effective end of the SQL
+            effective_end_index = -1
+            if end_sql_tag_index != -1 and semicolon_index != -1:
+                effective_end_index = min(end_sql_tag_index, semicolon_index)
+            elif end_sql_tag_index != -1:
+                effective_end_index = end_sql_tag_index
+            elif semicolon_index != -1:
+                effective_end_index = semicolon_index
+
+            if effective_end_index != -1:
+                extracted_sql = cleaned_sql[:effective_end_index].strip()
+                print(f"   [Clean] Extracted SQL up to terminator (</SQL> or ;): '{extracted_sql}'")
+            else:
+                # Fallback to original logic if no explicit tags or semicolons
+                print("   [Clean] No SQL start keyword found. Falling back to SQL start keyword detection.")
+                # FIX: Corrected regex pattern \\s to \s
+                sql_start_keywords = r"^(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|WITH)\s+"
+                start_match = re.search(sql_start_keywords, cleaned_sql, re.IGNORECASE)
+
+                if start_match:
+                    extracted_sql = cleaned_sql[start_match.start():].strip()
+                    print(f"   [Clean] Extracted SQL from start keyword: '{extracted_sql}'")
+                else:
+                    print(f"   [Clean] No SQL start keyword found. Returning original cleaned string: '{cleaned_sql}'")
+                    extracted_sql = cleaned_sql
+
+        # Ensure a semicolon at the end if it's a SELECT statement and missing
+        if extracted_sql.upper().startswith("SELECT") and not extracted_sql.endswith(';'):
+            extracted_sql += ';'
+            print(f"   [Clean] Added missing semicolon: '{extracted_sql}'")
+
+        return extracted_sql.strip()
+
+    # FIXED: The run method now ties your two functions together.
+    def run(self, compressed_schema: str, query: str, remediation_advice: Optional[str] = None) -> Tuple[Optional[str], Optional[float]]:
+        """
+        Generates a SQL query by creating the prompt, invoking the LLM, and cleaning the response.
         """
         print(f"   [Info] SQLGeneratorAgent: Generating SQL for query: '{query}'")
         
         try:
-            # Invoke the chain with the schema and query
-            response = self.llm_chain.invoke({
-                "schema": compressed_schema,
-                "query": query
-            })
+            # Step 1: Generate the prompt, including remediation advice if available
+            prompt = self._get_sql_generation_prompt(compressed_schema, query, remediation_advice)
             
-            # The response dictionary contains the generated text under the 'text' key
-            generated_sql = response.get('text', '').strip()
+            # Step 2: Invoke the LLM with the generated prompt
+            raw_llm_response = self.reasoning_llm.invoke(prompt)
+            if hasattr(raw_llm_response, 'content'):
+                raw_llm_response = raw_llm_response.content
             
-            # Clean up the output to ensure it's just the SQL
-            if "```" in generated_sql:
-                # Extract content between markdown code blocks
-                sql_match = re.search(r"```sql\n(.*?)\n```", generated_sql, re.DOTALL)
-                if sql_match:
-                    generated_sql = sql_match.group(1).strip()
-
-            # Ensure the query ends with a semicolon for consistency
-            if generated_sql and not generated_sql.endswith(';'):
-                generated_sql += ';'
-                
-            # A final cleanup to remove any potential leading characters before SELECT
-            if generated_sql and "SELECT" in generated_sql:
-                generated_sql = "SELECT" + generated_sql.split("SELECT", 1)[1]
+            # Step 3: Clean the raw response using your custom logic
+            generated_sql = self._clean_generated_sql(raw_llm_response)
 
             if generated_sql:
                 # Adapt the generated SQL for the specific database dialect
                 adapted_sql = adapt_sql_for_dialect(generated_sql, CONFIG["db_dialect"])
                 print(f"   [Info] SQLGeneratorAgent Captured SQL: {adapted_sql}")
-                return generated_sql, 0.90
+                return adapted_sql, 0.90 # Returning adapted_sql
             else:
                 print("   [Warning] SQLGeneratorAgent did not produce a valid SQL query.")
                 return None, 0.1
@@ -1396,18 +1498,7 @@ You are an expert SQLite programmer. Your sole purpose is to generate a single, 
             return None, 0.0
 
 
-# 5. REFINED TESTING ORCHESTRATOR (Corrected & Enhanced)
-
-# Define the AgentState for LangGraph
-class AgentState(TypedDict):
-    query: str
-    sub_queries: List[str] # New: List of sub-queries
-    results: List[Dict] # New: List of results for each sub-query
-    error_message: Optional[str] # Any error message at the overall workflow level
-    error_type: Optional[str] # For logging classification
-    remediation_suggestion: Optional[str] # For logging suggestion
-
-
+# 5.   
 # Initialize spaCy for query splitting
 nlp = model_manager.get("spacy_model")
 
@@ -1458,9 +1549,16 @@ def table_selector_node(state: AgentState, config: Dict, manager: ModelManager) 
         llm_threshold=config['llm_confidence_threshold'],
         embedding_threshold=config['embedding_confidence_threshold']
     )
+    # FIXED: Get remediation advice from state
+    remediation_advice = state.get('remediation_advice')
+
     for i, sub_query in enumerate(state['sub_queries']):
         print(f"   [Info] Table Selector for sub-query {i+1}: '{sub_query}'")
-        state['results'][i]['selected_tables'] = table_selector.run(sub_query)
+        # FIXED: Pass remediation advice to the agent's run method
+        state['results'][i]['selected_tables'] = table_selector.run(sub_query, remediation_advice)
+    
+    # Clear advice after use
+    state['remediation_advice'] = None
     return state
 
 def relationship_mapper_node(state: AgentState, config: Dict, manager: ModelManager) -> AgentState:
@@ -1500,20 +1598,27 @@ def schema_compressor_node(state: AgentState) -> AgentState:
 # Node to generate SQL (does not execute)
 def sql_generator_node(state: AgentState, config: Dict, manager: ModelManager, db: SQLDatabase) -> AgentState:
     print("\n--- [MONITOR] SQL Generator Node: Processing sub-queries ---")
-    sql_generator_instance = SQLGeneratorAgent(model_manager=manager, db=db) # Instantiate the class
+    sql_generator_instance = SQLGeneratorAgent(model_manager=manager, db=db)
+    # FIXED: Get remediation advice from state
+    remediation_advice = state.get('remediation_advice')
+
     for i, sub_query in enumerate(state['sub_queries']):
         print(f"   [Info] SQL Generator for sub-query {i+1}: '{sub_query}'")
+        # FIXED: Pass remediation advice to the agent's run method
         generated_sql, confidence = sql_generator_instance.run(
-            state['results'][i]['compressed_schema'], sub_query
+            state['results'][i]['compressed_schema'], sub_query, remediation_advice
         )
         state['results'][i]['generated_sql'] = generated_sql
         state['results'][i]['confidence'] = confidence
         if generated_sql is None:
             state['results'][i]['error_message'] = "SQL Generation failed: No valid SQL query was produced."
-            print(f"   🛑 SQL Generation failed for sub-query {i+1}.")
+            print(f"🛑 SQL Generation failed for sub-query {i+1}.")
         else:
             state['results'][i]['error_message'] = None
-            print(f"   ✅ SQL Generation successful for sub-query {i+1}.")
+            print(f"✅ SQL Generation successful for sub-query {i+1}.")
+
+    # Clear advice after use
+    state['remediation_advice'] = None
     return state
 
 # New node for Firewall Check
@@ -1634,52 +1739,97 @@ def error_remediation_node(state: AgentState, manager: ModelManager) -> AgentSta
     return state
 
 
+def final_answer_node(state: AgentState, manager: ModelManager) -> AgentState:
+    """
+    A final node to prepare the response or acknowledge an unrecoverable error.
+    """
+    print("\n--- [MONITOR] Final Answer Node: Consolidating response ---")
+    if state.get('error_message'):
+        print(f"   [Final Status] Execution failed: {state['error_message']}")
+        state['llm_reasoning'] = f"The process failed with the following error: {state['error_message']}"
+    else:
+        print("   [Final Status] Execution completed.")
+        state['llm_reasoning'] = "The query was processed. See results for details."
+    return state
+ 
 # --- Routing Logic ---
 def route_on_tables_selected(state: AgentState) -> str:
     """Routes based on whether tables were selected by the TableSelector for any sub-query."""
-    if any(not res['selected_tables'] for res in state['results']):
-        print("   [Router] Some sub-queries found no tables. Routing to 'no_tables_found'.")
+    if any(not res.get('selected_tables') for res in state['results']):
+        print("    [Router] Some sub-queries found no tables. Routing to 'no_tables_found'.")
         return "no_tables_found"
-    print("   [Router] Tables selected for all sub-queries. Routing to 'relationship_mapper'.")
+    print("    [Router] Tables selected for all sub-queries. Routing to 'relationship_mapper'.")
     return "relationship_mapper"
 
 def route_from_sql_generator(state: AgentState) -> str:
     """Routes based on whether SQL was generated for all sub-queries."""
     if any(res.get('generated_sql') is None for res in state['results']):
-        print("   [Router] SQL generation failed for some sub-queries. Routing to 'error_remediation'.")
+        print("    [Router] SQL generation failed for some sub-queries. Routing to 'error_remediation'.")
         return "error_remediation"
-    print("   [Router] SQL generated for all sub-queries. Routing to 'firewall_check'.")
+    print("    [Router] SQL generated for all sub-queries. Routing to 'firewall_check'.")
     return "firewall_check"
 
 def route_from_firewall(state: AgentState) -> str:
     """Routes based on firewall check result for all sub-queries."""
     if any(res.get('firewall_status', (False, ""))[0] == False for res in state['results']):
-        print("   [Router] Firewall check failed for some sub-queries. Routing to 'error_remediation'.")
+        print("    [Router] Firewall check failed for some sub-queries. Routing to 'error_remediation'.")
         return "error_remediation"
-    print("   [Router] Firewall check passed for all sub-queries. Routing to 'human_sql_review'.")
+    print("    [Router] Firewall check passed for all sub-queries. Routing to 'human_sql_review'.")
     return "human_sql_review"
 
 def route_from_human_review(state: AgentState) -> str:
     """Routes based on human review result for all sub-queries."""
     if any(res.get('user_approved_sql') is None or res.get('user_approved_sql') == "REJECTED_BY_HUMAN" for res in state['results']):
-        print("   [Router] Human review rejected or no SQL for some sub-queries. Routing to 'error_remediation'.")
+        print("    [Router] Human review rejected or no SQL for some sub-queries. Routing to 'error_remediation'.")
         return "error_remediation"
-    print("   [Router] Human review approved/corrected all SQL queries. Routing to 'sql_executor'.")
+    print("    [Router] Human review approved/corrected all SQL queries. Routing to 'sql_executor'.")
     return "sql_executor"
 
 def route_from_sql_executor(state: AgentState) -> str:
     """Routes based on SQL execution result for all sub-queries."""
     if any(res.get('error_message') for res in state['results']):
-        print("   [Router] SQL execution failed for some sub-queries. Routing to 'error_remediation'.")
+        print("    [Router] SQL execution failed for some sub-queries. Routing to 'error_remediation'.")
         return "error_remediation"
-    print("   [Router] SQL execution successful for all sub-queries. Routing to 'end'.")
-    return "end"
+    print("    [Router] SQL execution successful for all sub-queries. Routing to 'final_answer'.")
+    return "final_answer"
 
+def route_from_error_remediation(state: AgentState):
+    """Routes based on the classified error type for a specific sub-query."""
+    remediation_suggestion = None
+    for result in state['results']:
+        if result.get('error_message'):
+            remediation_suggestion = result.get('remediation_suggestion', '')
+            break
+
+    # FIXED: Pass remediation_suggestion to the next state on retry
+    if remediation_suggestion:
+        state['remediation_advice'] = remediation_suggestion
+    else:
+        state['remediation_advice'] = None
+
+    if "Table Selection" in (remediation_suggestion or "") or "Relationship Mapping" in (remediation_suggestion or ""):
+        if state.get('current_attempt', 0) < 2:
+            state['current_attempt'] = state.get('current_attempt', 0) + 1
+            print(f"    [Retry] Re-attempting from 'table_selector' after remediation. Attempt {state['current_attempt']}.")
+            return "table_selector"
+    
+    if "SQL Generator" in (remediation_suggestion or "") or "Syntax" in (remediation_suggestion or ""):
+        if state.get('current_attempt', 0) < 2:
+            state['current_attempt'] = state.get('current_attempt', 0) + 1
+            print(f"    [Retry] Re-attempting from 'sql_generator' after remediation. Attempt {state['current_attempt']}.")
+            return "sql_generator"
+
+    print("    [Failure] Cannot resolve with a retry or max attempts reached. Routing to 'final_answer'.")
+    return "final_answer"
+
+
+
+# --- Build the LangGraph Workflow ---
 # --- Build the LangGraph Workflow ---
 workflow = StateGraph(AgentState)
 
 # Add nodes
-workflow.add_node("query_splitter", lambda state: query_splitter_node(state, model_manager)) 
+workflow.add_node("query_splitter", lambda state: query_splitter_node(state, model_manager))
 workflow.add_node("table_selector", lambda state: table_selector_node(state, CONFIG, model_manager))
 workflow.add_node("relationship_mapper", lambda state: relationship_mapper_node(state, CONFIG, model_manager))
 workflow.add_node("schema_compressor", schema_compressor_node)
@@ -1689,12 +1839,12 @@ workflow.add_node("human_sql_review", lambda state: human_sql_review_node(state,
 workflow.add_node("sql_executor", lambda state: sql_executor_node(state, db))
 workflow.add_node("error_remediation", lambda state: error_remediation_node(state, model_manager))
 workflow.add_node("no_tables_found", lambda state: {**state, 'error_message': "No relevant tables found for one or more sub-queries."})
-
+workflow.add_node("final_answer", lambda state: final_answer_node(state, model_manager))
 
 # Set entry point
 workflow.set_entry_point("query_splitter")
 
-# Add edges
+# Add edges and conditional edges
 workflow.add_edge("query_splitter", "table_selector")
 workflow.add_conditional_edges(
     "table_selector",
@@ -1704,6 +1854,7 @@ workflow.add_conditional_edges(
         "no_tables_found": "no_tables_found"
     }
 )
+workflow.add_edge("no_tables_found", "final_answer")
 workflow.add_edge("relationship_mapper", "schema_compressor")
 workflow.add_edge("schema_compressor", "sql_generator")
 workflow.add_conditional_edges(
@@ -1734,16 +1885,24 @@ workflow.add_conditional_edges(
     "sql_executor",
     route_from_sql_executor,
     {
-        "end": END,
+        "final_answer": "final_answer",
         "error_remediation": "error_remediation"
     }
 )
-
-workflow.add_edge("no_tables_found", END)
-workflow.add_edge("error_remediation", END)
-
+workflow.add_conditional_edges(
+    "error_remediation",
+    route_from_error_remediation,
+    {
+        "table_selector": "table_selector",
+        "sql_generator": "sql_generator",
+        "final_answer": "final_answer"
+    }
+)
+workflow.add_edge("final_answer", END)
 
 app = workflow.compile()
+
+
 print("\n✅ Intelligent Multi-Agent SQL Generation System compiled successfully.\n")
 
 # --- Visualize the workflow graph ---
@@ -1753,8 +1912,8 @@ try:
     graph_image_path = 'langgraph_workflow.png'
     # Get the drawable graph object
     drawable_graph = app.get_graph()
-    # Get the DOT representation of the graph
-    dot_graph_source = drawable_graph.draw_dot()
+    # FIXED: Changed .draw_dot() to the correct .to_dot() method
+    dot_graph_source = drawable_graph.to_dot()
     # Create a graphviz.Source object
     source = graphviz.Source(dot_graph_source, format='png')
     # Render and save the image
@@ -1778,15 +1937,21 @@ except Exception as e:
 
 
 def run_db_agent(query: str):
-    print(f"\n{'='*80}\n🚀 STARTING NEW QUERY: '{query}'\n{'='*80}")
-    # Simplified initial state as remediation is handled differently
+    # This is the corrected way to invoke the workflow
     initial_state = {
         "query": query,
         "sub_queries": [],
         "results": [],
         "error_message": None,
         "error_type": None,
-        "remediation_suggestion": None
+        "remediation_suggestion": None,
+        "current_attempt": 0,
+        "query_history": [],
+        "context": "",
+        "sql_query": "",
+        "db_result": "",
+        "llm_reasoning": "",
+        "intermediate_steps": []
     }
   
     try:
@@ -1815,15 +1980,16 @@ def run_db_agent(query: str):
     except Exception as e:
         print("\n" + "="*80)
         print("--- AGENT EXECUTION HALTED DUE TO A CRITICAL ERROR ---\n")
-        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         print("="*80)
     finally:
         print("\n--- [PIPELINE] Query processing complete. ---\n")
 
 # --- Define Test Queries ---
 TEST_QUERIES = [
-    # "Who are the most frequent customers?",
-   #  "List all customers with their email and phone?",
+    "Who are the most frequent customers?",
+    "List all customers with their email and phone?",
     "Which customer placed the highest total order amount?",
     "Which customers made purchases in the last 7 days?",
     "How many customers have placed more than one order?", 
