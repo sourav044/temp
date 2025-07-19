@@ -26,7 +26,7 @@ print("--- Step 1: Installing required libraries ---")
     spacy \
     fuzzywuzzy \
     graphviz \
-    langchain-google-genai # Added for graph visualization
+    langchain-google-genai
 
 # Download a small spaCy model
 try:
@@ -50,7 +50,7 @@ import html
 import sqlite3
 import torch
 import pandas as pd
-from IPython.display import display, Markdown, HTML, clear_output, Image # Added Image for graph visualization
+from IPython.display import display, Markdown, HTML, clear_output, Image
 import ipywidgets as widgets
 from datetime import datetime
 from typing import TypedDict, List, Set, Optional, Dict, Tuple, Any
@@ -67,26 +67,26 @@ import spacy
 
 # --- LangChain & Transformers Imports ---
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
-from langchain.chains import LLMChain  
+from langchain.chains import LLMChain
 from langchain_huggingface import HuggingFacePipeline
-from langchain_community.utilities.sql_database import SQLDatabase # Keep this import
+from langchain_community.utilities.sql_database import SQLDatabase
 from sentence_transformers import SentenceTransformer, util # For embeddings
-from langchain_google_genai import ChatGoogleGenerativeAI # New import for ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate # New import from user's snippet
-from langchain_core.tools import tool # New import from user's snippet
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage # New import from user's snippet
-  
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent # New import for LangChain SQL Agent
-from langchain import hub # New import for LangChain SQL Agent prompt
-from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit # New import for LangChain SQL Agent
+from langgraph.prebuilt import create_react_agent
+from langchain import hub
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 
 # --- Scikit-learn for cosine similarity (if not using torch.nn.functional.cosine_similarity) ---
 from sklearn.metrics.pairwise import cosine_similarity as sk_cosine_similarity
 
 # --- Fuzzy string matching ---
-from fuzzywuzzy import fuzz # Corrected import for token_set_ratio
+from fuzzywuzzy import fuzz
 
 # --- Graphviz for visualization ---
 try:
@@ -105,11 +105,11 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
 # --- FIX: Prevent SystemError by disabling tokenizer parallelism ---
-os.environ["TOKENIZERS_PARALLELISM"] = "false" 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# --- NEW: Disable LangSmith tracing to prevent API key warnings ---\
+# --- NEW: Disable LangSmith tracing to prevent API key warnings ---
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
-os.environ["LANGCHAIN_API_KEY"] = " " 
+os.environ["LANGCHAIN_API_KEY"] = " " # Placeholder for API key
 
 # --- CONFIGURATION DICTIONARY ---
 CONFIG = {
@@ -127,7 +127,8 @@ CONFIG = {
     # New configurations from user's snippet
     "max_query_time": 10,
     "max_rows": 1000,
-    "allowed_sql_ops": ["SELECT"]
+    "allowed_sql_ops": ["SELECT"],
+    "recursion_limit": 50 # Increased to avoid GraphRecursionError
 }
 
 # Initialize NLTK components
@@ -350,10 +351,10 @@ class SchemaExtractorAgent:
             return [col_name]
 
         variations = set()
-        
+
         cleaned_col_name = re.sub(r'[^a-zA-Z0-9_]', ' ', col_name)
         words = re.findall(r'[A-Z]?[a-z]+|[0-9]+', cleaned_col_name)
-        
+
         filtered_words = []
         table_name_lower = table_name.lower()
         for word in words:
@@ -380,13 +381,13 @@ class SchemaExtractorAgent:
                                 variations.add(synonym)
                 except Exception:
                     pass
-        
+
         if col_name.lower() != table_name_lower and col_name.lower() not in variations:
             variations.add(col_name.lower())
             variations.add(lemmatizer.lemmatize(col_name.lower()))
 
         final_variations = {v for v in variations if v and not v.isspace()}
-        
+
         return sorted(list(final_variations))
 
     def run(self) -> Optional[str]:
@@ -431,15 +432,15 @@ class SchemaExtractorAgent:
 
                             sample_values = [r.get(col_name) for r in sample_rows if r is not None]
                             semantic_type = self._infer_semantic_type(sample_values)
-                            
+
                             # If a semantic type is inferred, it overrides the physical type.
                             final_type = semantic_type if semantic_type else physical_type.upper()
-                            
+
                             columns[col_name] = {
                                 "physical_type": final_type,
                                 "variations": self._get_linguistic_variations(col_name, table_name_lower)
                             }
-                        
+
                         cursor.execute(f"PRAGMA foreign_key_list('{table_name_original}');")
                         for fk in cursor.fetchall():
                             schema_data["relationships"].append({
@@ -460,7 +461,7 @@ class SchemaExtractorAgent:
                     "variations": self._get_linguistic_variations(table_name_lower, table_name_lower),
                     "sample_rows": sample_rows
                 }
-            
+
             print(f"   [Info] Extracted {len(schema_data['relationships'])} relationships.")
 
         except Exception as e:
@@ -579,7 +580,7 @@ If the query SHOULD be split:
             print(f"   [Info] Generated Sub-Queries: {sub_queries}")
         else:
             print(f"   [Info] Query treated as a single unit.")
-        
+
         return should_split, sub_queries, reasoning
 
 
@@ -623,7 +624,7 @@ class TableSelectorAgent:
             f"- {table_name}: {', '.join(self.full_schema['tables'][table_name]['columns'].keys())}"
             for table_name in self.table_names
         ])
-        
+
         remediation_block = ""
         if remediation_advice:
             remediation_block = f"""
@@ -681,7 +682,7 @@ Output your response in a structured JSON format with a list of tables, their re
         using semantic tokens from the query and table names/variations.
         """
         print("   [Info] Triggering embedding-based fallback for table selection...")
-        
+
         query_semantic_tokens = self._get_query_tokens(query)
         print(f"   [Info] Query Semantic Tokens for Table Selector Embedding: {query_semantic_tokens}") # Added log
         query_embedding = self.embedding_model.encode(" ".join(query_semantic_tokens), convert_to_tensor=True, show_progress_bar=False)
@@ -694,20 +695,20 @@ Output your response in a structured JSON format with a list of tables, their re
             if 'variations' in table_info and table_info['variations']:
                 table_text += " " + " ".join(table_info['variations'])
             table_embeddings_data.append((table_name, table_text))
-        
+
         if not table_embeddings_data:
             return []
 
         # Encode all table texts in one go for efficiency
         table_texts = [item[1] for item in table_embeddings_data]
         table_names_ordered = [item[0] for item in table_embeddings_data]
-        
+
         table_embeddings = self.embedding_model.encode(table_texts, convert_to_tensor=True, show_progress_bar=False)
 
         scores = util.pytorch_cos_sim(query_embedding, table_embeddings)[0]
         table_scores = list(zip(table_names_ordered, scores.tolist()))
         table_scores.sort(key=lambda x: x[1], reverse=True)
-        
+
         return table_scores
 
     def run(self, query: str, remediation_advice: Optional[str] = None) -> List[str]:
@@ -719,17 +720,16 @@ Output your response in a structured JSON format with a list of tables, their re
         raw_llm_response = self.reasoning_llm.invoke(prompt)
         if hasattr(raw_llm_response, 'content'):
             raw_llm_response = raw_llm_response.content
-        
-        # ... (rest of the run method remains unchanged) ...
+
         llm_selections = self._parse_llm_response(raw_llm_response)
-        
+
         llm_proposed_table_names = set()
         print("   [Decision] LLM Table Reasoning Results:")
         for item in llm_selections:
             table_name = item.get('table')
             confidence = item.get('confidence', 0.0)
             reasoning = item.get('reasoning', 'No reasoning provided.')
-            
+
             if table_name and table_name.lower() in self.table_names:
                 print(f"      - Table '{table_name}': Confidence: {confidence:.2f}, Reason: {reasoning}")
                 llm_proposed_table_names.add(table_name.lower())
@@ -755,7 +755,7 @@ Output your response in a structured JSON format with a list of tables, their re
                 if score >= self.embedding_threshold:
                     embedding_selected_table_names.add(table_name.lower())
                     print(f"        ✅ Selected by Embedding (Score: {score:.4f} >= {self.embedding_threshold})")
-            
+
             if embedding_selected_table_names:
                 final_selected_tables = sorted(list(embedding_selected_table_names))
             else:
@@ -805,7 +805,7 @@ class RelationshipMapperAgent:
         cleaned_col_name = re.sub(r'[^a-zA-Z0-9_]', ' ', col_name)
         # Split by underscore and camelCase
         tokens = re.findall(r'[A-Z]?[a-z]+|[0-9]+', cleaned_col_name)
-        
+
         if not self.nlp:
             return {t.lower() for t in tokens}
 
@@ -895,12 +895,12 @@ class RelationshipMapperAgent:
             if rel.get('type') == 'explicit':
                 graph[rel['from_table']].append((rel['to_table'], rel))
                 graph[rel['to_table']].append((rel['from_table'], rel))
-        
+
         # Dijkstra's algorithm implementation
         queue = [(0, start_table, [])]
         dist = {table: float('inf') for table in graph}
         dist[start_table] = 0
-        
+
         while queue:
             cost, current, path = heapq.heappop(queue)
             if current == end_table:
@@ -920,7 +920,7 @@ class RelationshipMapperAgent:
         join_plan_visual = []
         suggested_group_by_columns = []
         suggested_filter_values = {}
-        cols_to_remove_for_agg = set() 
+        cols_to_remove_for_agg = set()
 
         # Linguistic Query Decomposition
         query_semantic_tokens = self._get_query_tokens(query)
@@ -958,10 +958,10 @@ class RelationshipMapperAgent:
             for col_name in info['column_names_ordered']:
                 # Use the pre-computed variations from the schema
                 col_variations = info['columns'].get(col_name, {}).get('variations', [col_name.lower()])
-                
+
                 # Convert query semantic tokens to a string for fuzzy matching
                 query_str_for_fuzzy = " ".join(query_semantic_tokens)
-                
+
                 # Fuzzy Matching (Token Set Ratio)
                 # Compare query terms against ALL variations of the column
                 best_fuzzy_score = 0.0
@@ -982,10 +982,10 @@ class RelationshipMapperAgent:
                 if query_semantic_tokens and col_variations: # Ensure there are tokens/variations to compare
                     # Create a single descriptive string for the column using its variations
                     col_description_for_embedding = " ".join(col_variations)
-                    
+
                     query_embedding = self.embedding_model.encode(query_str_for_fuzzy, convert_to_tensor=True, show_progress_bar=False)
                     col_embedding = self.embedding_model.encode(col_description_for_embedding, convert_to_tensor=True, show_progress_bar=False)
-                    
+
                     sim_score = util.pytorch_cos_sim(query_embedding, col_embedding).item()
 
                     if sim_score > self.semantic_column_threshold:
@@ -995,7 +995,7 @@ class RelationshipMapperAgent:
                             potential_column_matches[q_token][f"{table_name}.{col_name}"] = max(potential_column_matches[q_token].get(f"{table_name}.{col_name}", 0), sim_score)
                             print(f"        - Column '{col_name}': Semantic match (Score: {sim_score:.2f}).\n")
                             kept_cols.add(col_name) # Tentatively keep
-                        
+
                         # Value-Based Filtering Hints: If a column is semantically relevant, check its sample values
                         if col_name in info['columns']:
                             distinct_values = self._get_distinct_sample_values(table_name, col_name)
@@ -1045,13 +1045,13 @@ class RelationshipMapperAgent:
         # --- Removed: Semantic Join Detection Logic ---
         # The previous semantic join detection logic using BGE-M3 and multi-hop paths
         # has been removed as per the user's request to rely solely on explicit relationships.
-        
+
         final_join_plan_str = "\n".join(join_plan_visual) if join_plan_visual else "No explicit joins detected among selected tables."
-        
+
         indented_schema = json.dumps(minimal_schema, indent=2).replace('\n', '\n      ')
         print(f"\n   [Output] Final Pruned Schema:\n      {indented_schema}")
         print(f"\n   [Output] Join Plan Visualization:\n      {final_join_plan_str}")
-        
+
         return minimal_schema, detected_relationships, suggested_group_by_columns, suggested_filter_values
 
 
@@ -1082,7 +1082,7 @@ class TablewiseLoaderAgent:
     def load(self, table_name: str) -> Optional[Dict]:
         """Loads and returns the schema for a single specified table from cache."""
         self._load_full_schema_into_memory() # Ensure schema is loaded
-        
+
         print(f"--- [MONITOR] Tablewise Loader Agent: Requesting schema for '{table_name}' ---")
 
         if table_name.lower() in self._schema_cache['tables']:
@@ -1109,13 +1109,13 @@ class SchemaCompressorAgent:
             schema_parts.append(f"{tbl}({', '.join(cols)})") # No newline here, add later
 
         compressed_schema_str = "\\n".join(sorted(schema_parts))
-        
+
         if relationships:
             compressed_schema_str += "\\n\\n/* RELATIONSHIPS */\\n"
             for rel in relationships:
                 # Only explicit relationships are passed to the compressor now
                 compressed_schema_str += f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']}\\n"
-        
+
         if suggested_group_by_columns:
             compressed_schema_str += "\\n\\n/* AGGREGATION HINTS */\\n"
             compressed_schema_str += f"Query might require GROUP BY on: {', '.join(suggested_group_by_columns)}\\n"
@@ -1164,7 +1164,7 @@ def adapt_sql_for_dialect(sql_query: str, db_dialect: str) -> str:
         # AND it's not one of the primary SQL command keywords that should never be quoted.
         # This function is primarily for quoting identifiers (table/column names)
         # that might clash with keywords.
-        if identifier != identifier.upper() and identifier.upper() in RESERVED_KEYWORDS: 
+        if identifier != identifier.upper() and identifier.upper() in RESERVED_KEYWORDS:
             if db_dialect == 'mysql':
                 return f"`{identifier}`"
             elif db_dialect in ('postgresql', 'oracle'):
@@ -1212,7 +1212,7 @@ class QueryFirewallAgent:
         Returns (True, cleaned_sql) if safe, (False, error_message) otherwise.
         """
         print(f"\n--- [MONITOR] Query Firewall: Validating query ---")
-        
+
         cleaned_sql_query = sql_query.strip()
 
         if not cleaned_sql_query:
@@ -1261,7 +1261,7 @@ class HumanInTheLoopAgent:
         print(f"   [Generated SQL]:\n{generated_sql}")
         print("\nPlease review the SQL query above. Enter 'approve' to proceed, 'reject' to stop, or provide a corrected SQL query:")
         user_input = input().strip()
-        
+
         if user_input.lower() == "approve":
             print("   [Info] User approved the generated SQL.")
             return generated_sql
@@ -1337,7 +1337,7 @@ Focus on identifying the root cause of the error (e.g., non-existent column, inc
 """
         return prompt
 
-    
+
 
     def run(self, state: AgentState) -> AgentState:
         """
@@ -1348,41 +1348,38 @@ Focus on identifying the root cause of the error (e.g., non-existent column, inc
         generated_sql = state['sql_query']
         query_history = "\n".join(state['query_history'])
         schema_context = state['context']
-        
+
         prompt = self._get_remediation_prompt(error_message, generated_sql, schema_context, query_history)
         raw_llm_response = self.reasoning_llm.invoke(prompt)
-        
+
         remediation_advice = "No specific advice could be generated."
-        
+
         try:
             advice_json = json.loads(re.search(r'\{.*\}', raw_llm_response.content, re.DOTALL).group(0))
             remediation_advice = advice_json.get("remediation_advice", remediation_advice)
         except (json.JSONDecodeError, AttributeError) as e:
             print(f"   [Warning] Failed to parse LLM remediation response: {e}. Raw: {raw_llm_response.content[:200]}...")
-        
+
         print(f"   [Decision] Remediation Advice: {remediation_advice}")
         state['remediation_advice'] = remediation_advice
-        
+
         return state
 
-# 4.9. 🔹 SQL Generator Agent (Using a direct LLMChain for local models)
-# 4.9. 🔹 SQL Generator Agent (Using your proven prompt and cleaning logic)
+# 4.9. 🔹 SQL Generator Agent (with a more concise and rule-driven prompt)
 class SQLGeneratorAgent:
     """
-    Generates a SQL query using a direct LLM call with a custom XML-style prompt
+    Generates a SQL query using a direct LLM call with a custom, rule-based prompt
     and a robust cleaning function.
     """
     def __init__(self, model_manager: ModelManager, db: SQLDatabase):
-        # We only need the reasoning_llm for a direct invocation
         self.reasoning_llm = model_manager.get('reasoning_llm')
         print("SQLGeneratorAgent initialized with custom prompt and cleaning logic.")
 
-    # FIXED: This is your prompt function, now modified to accept and inject remediation_advice
+    # FIXED: Replaced the prompt with your new, clearer, and more rule-driven version.
     def _get_sql_generation_prompt(self, compressed_schema: str, query: str, remediation_advice: Optional[str] = None) -> str:
-        
+
         remediation_block = ""
         if remediation_advice:
-            # This is the XML block for remediation advice, added only on retry attempts
             remediation_block = f"""
 <PriorAttemptCorrection>
 The previous attempt failed. Use the following advice to improve your query:
@@ -1390,13 +1387,20 @@ The previous attempt failed. Use the following advice to improve your query:
 </PriorAttemptCorrection>
 """
 
+        # This new prompt is more direct and structured as a list of rules.
         return f"""<Instructions>
-You are an expert SQLite analyst. Your task is to write a single, valid, and efficient SQLite query to answer the user's question based on the provided schema.
-- Use ONLY the tables and columns listed in the <Schema> section. Do not hallucinate table or column names.
-- **IMPORTANT**: If a table or column name is a SQL reserved keyword (e.g., "order"), enclose it in square brackets (e.g., [order]).
-- Pay close attention to the user's question to correctly apply constraints like `LIMIT`, `ORDER BY`, and `WHERE` clauses.
-- If the query implies aggregation (e.g., "count", "average", "sum"), use appropriate SQL aggregate functions and `GROUP BY` clauses if necessary.
-- Output ONLY the raw SQL query, with no additional text, explanations, or markdown.
+You are an expert SQLite analyst. Your task is to write a single, valid SQLite query to answer the user's question, following all rules below.
+
+**Rules:**
+1.  Use ONLY the tables and columns listed in the <Schema>. Do not hallucinate names.
+2.  When using aggregate functions (COUNT, SUM, AVG), you MUST include all non-aggregated selected columns in the GROUP BY clause.
+3.  Use table aliases for all joins (e.g., SELECT c.name FROM table_name AS c).
+4.  Fully qualify all column names in JOIN conditions (e.g., ON o.column_name = c.column_name).
+5.  If a column name is a SQL reserved keyword or contains special characters, enclose it in square brackets (e.g., [table_name]).
+6.  For date comparisons, use the DATE() function (e.g., WHERE DATE(order_date) = '2025-07-20').
+7.  For text searches, use the LIKE operator with '%' wildcards.
+8.  Infer actual values for query parameters. Do NOT use placeholders like '?'.
+9.  Output ONLY the raw SQL query. No explanations or markdown.
 </Instructions>
 {remediation_block}
 <Schema>
@@ -1447,7 +1451,6 @@ You are an expert SQLite analyst. Your task is to write a single, valid, and eff
             else:
                 # Fallback to original logic if no explicit tags or semicolons
                 print("   [Clean] No SQL start keyword found. Falling back to SQL start keyword detection.")
-                # FIX: Corrected regex pattern \\s to \s
                 sql_start_keywords = r"^(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|WITH)\s+"
                 start_match = re.search(sql_start_keywords, cleaned_sql, re.IGNORECASE)
 
@@ -1465,30 +1468,25 @@ You are an expert SQLite analyst. Your task is to write a single, valid, and eff
 
         return extracted_sql.strip()
 
-    # FIXED: The run method now ties your two functions together.
     def run(self, compressed_schema: str, query: str, remediation_advice: Optional[str] = None) -> Tuple[Optional[str], Optional[float]]:
         """
         Generates a SQL query by creating the prompt, invoking the LLM, and cleaning the response.
         """
         print(f"   [Info] SQLGeneratorAgent: Generating SQL for query: '{query}'")
-        
+
         try:
-            # Step 1: Generate the prompt, including remediation advice if available
             prompt = self._get_sql_generation_prompt(compressed_schema, query, remediation_advice)
-            
-            # Step 2: Invoke the LLM with the generated prompt
             raw_llm_response = self.reasoning_llm.invoke(prompt)
             if hasattr(raw_llm_response, 'content'):
                 raw_llm_response = raw_llm_response.content
-            
-            # Step 3: Clean the raw response using your custom logic
+
             generated_sql = self._clean_generated_sql(raw_llm_response)
 
             if generated_sql:
-                # Adapt the generated SQL for the specific database dialect
                 adapted_sql = adapt_sql_for_dialect(generated_sql, CONFIG["db_dialect"])
                 print(f"   [Info] SQLGeneratorAgent Captured SQL: {adapted_sql}")
-                return adapted_sql, 0.90 # Returning adapted_sql
+
+                return generated_sql, 0.90
             else:
                 print("   [Warning] SQLGeneratorAgent did not produce a valid SQL query.")
                 return None, 0.1
@@ -1498,7 +1496,7 @@ You are an expert SQLite analyst. Your task is to write a single, valid, and eff
             return None, 0.0
 
 
-# 5.   
+# 5.
 # Initialize spaCy for query splitting
 nlp = model_manager.get("spacy_model")
 
@@ -1506,16 +1504,16 @@ nlp = model_manager.get("spacy_model")
 def query_splitter_node(state: AgentState, manager: ModelManager) -> AgentState: # Added manager parameter
     print("\n--- [MONITOR] Query Splitter: Splitting query into sub-queries ---")
     query = state['query']
-    
+
     # Instantiate the QuerySplitterAgent
-    query_splitter_agent = QuerySplitterAgent(model_manager=manager) 
-    
+    query_splitter_agent = QuerySplitterAgent(model_manager=manager)
+
     # Run the agent to get the splitting decision and sub-queries
     should_split, sub_queries, reasoning = query_splitter_agent.run(query)
 
     # Filter out empty strings and ensure uniqueness if desired (though not strictly necessary for processing)
     sub_queries = [q for q in sub_queries if q]
-    
+
     if not sub_queries:
         sub_queries = [query] # Fallback to original query if no sub-queries found
 
@@ -1523,7 +1521,7 @@ def query_splitter_node(state: AgentState, manager: ModelManager) -> AgentState:
         print("   [Info] Single query detected, no complex splitting needed.")
     else:
         print(f"   [Info] Split query into {len(sub_queries)} sub-queries: {sub_queries}")
-    
+
     state['sub_queries'] = sub_queries
     state['results'] = [{
         'selected_tables': [],
@@ -1544,7 +1542,7 @@ def query_splitter_node(state: AgentState, manager: ModelManager) -> AgentState:
 def table_selector_node(state: AgentState, config: Dict, manager: ModelManager) -> AgentState:
     print("\n--- [MONITOR] Table Selector Agent: Processing sub-queries ---")
     table_selector = TableSelectorAgent(
-        model_manager=manager, 
+        model_manager=manager,
         schema_path=config['db_structured_schema_path'],
         llm_threshold=config['llm_confidence_threshold'],
         embedding_threshold=config['embedding_confidence_threshold']
@@ -1556,7 +1554,7 @@ def table_selector_node(state: AgentState, config: Dict, manager: ModelManager) 
         print(f"   [Info] Table Selector for sub-query {i+1}: '{sub_query}'")
         # FIXED: Pass remediation advice to the agent's run method
         state['results'][i]['selected_tables'] = table_selector.run(sub_query, remediation_advice)
-    
+
     # Clear advice after use
     state['remediation_advice'] = None
     return state
@@ -1564,7 +1562,7 @@ def table_selector_node(state: AgentState, config: Dict, manager: ModelManager) 
 def relationship_mapper_node(state: AgentState, config: Dict, manager: ModelManager) -> AgentState:
     print("\n--- [MONITOR] Relationship Mapper Agent: Processing sub-queries ---")
     relationship_mapper = RelationshipMapperAgent(
-        full_schema_path=config['db_structured_schema_path'], 
+        full_schema_path=config['db_structured_schema_path'],
         model_manager=manager,
         semantic_join_threshold=config['semantic_join_threshold'],
         semantic_column_threshold=config['semantic_column_threshold']
@@ -1629,7 +1627,7 @@ def firewall_check_node(state: AgentState, config: Dict) -> AgentState:
         max_time=config['max_query_time'],
         max_rows=config['max_rows']
     )
-    
+
     for i, result in enumerate(state['results']):
         if result.get('generated_sql') is None:
             result['firewall_status'] = (False, "No SQL query to validate.")
@@ -1640,7 +1638,7 @@ def firewall_check_node(state: AgentState, config: Dict) -> AgentState:
         print(f"   [Info] Firewall Check for sub-query {i+1}: '{state['sub_queries'][i]}'")
         is_safe, message = firewall.validate_query(result['generated_sql'])
         result['firewall_status'] = (is_safe, message)
-        
+
         if not is_safe:
             result['error_message'] = f"Firewall Check Rejected: {message}"
             print(f"   🛑 Firewall Check Rejected for sub-query {i+1}: {message}")
@@ -1654,7 +1652,7 @@ def firewall_check_node(state: AgentState, config: Dict) -> AgentState:
 def human_sql_review_node(state: AgentState, config: Dict) -> AgentState:
     print("\n--- [MONITOR] Human SQL Review Node: Processing sub-queries ---")
     human_agent = HumanInTheLoopAgent()
-    
+
     for i, result in enumerate(state['results']):
         # Only prompt for human review if there's an error or low confidence for this sub-query
         if result.get('error_message') or (result.get('confidence') is not None and result['confidence'] < config['llm_confidence_threshold']):
@@ -1667,7 +1665,7 @@ def human_sql_review_node(state: AgentState, config: Dict) -> AgentState:
 
             print(f"   [Info] Human Review for sub-query {i+1}: '{state['sub_queries'][i]}'")
             user_response_sql = human_agent.run(state['sub_queries'][i], current_sql, result.get('error_message'))
-            
+
             if user_response_sql == "REJECTED_BY_HUMAN":
                 result['user_approved_sql'] = None
                 result['error_message'] = "Human Review Rejected: User explicitly rejected the SQL query."
@@ -1710,7 +1708,7 @@ def sql_executor_node(state: AgentState, db: SQLDatabase) -> AgentState:
             print(f"   ✅ SQL Execution completed successfully for sub-query {i+1}.")
         except Exception as e:
             result['final_result'] = None
-            result['error_message'] = f"SQL Execution Failed: {str(e)}"
+            result['error_message'] = f"SQL Execution Failed: {str(e)}"\
             print(f"   🛑 SQL Execution Failed for sub-query {i+1}: {e}")
     return state
 
@@ -1718,16 +1716,16 @@ def sql_executor_node(state: AgentState, db: SQLDatabase) -> AgentState:
 def error_remediation_node(state: AgentState, manager: ModelManager) -> AgentState:
     print(f"\n--- [MONITOR] Error Remediation Agent: Processing sub-queries ---")
     remediation_agent_instance = ErrorRemediationAgent(manager)
-    
+
     for i, result in enumerate(state['results']):
         if result.get('error_message'):
             error_msg = result['error_message']
             generated_sql_for_classification = result.get('generated_sql', '')
-            
+
             print(f"   [Info] Remediating error for sub-query {i+1}: {error_msg}")
             error_type = remediation_agent_instance.classify_error(error_msg, generated_sql_for_classification)
             remediation_suggestion = remediation_agent_instance.suggest_remediation(error_type, result)
-            
+
             result['error_type'] = error_type
             result['remediation_suggestion'] = remediation_suggestion
             # Note: In this multi-query flow, remediation doesn't re-attempt SQL generation directly,
@@ -1744,18 +1742,19 @@ def final_answer_node(state: AgentState, manager: ModelManager) -> AgentState:
     A final node to prepare the response or acknowledge an unrecoverable error.
     """
     print("\n--- [MONITOR] Final Answer Node: Consolidating response ---")
-    if state.get('error_message'):
-        print(f"   [Final Status] Execution failed: {state['error_message']}")
-        state['llm_reasoning'] = f"The process failed with the following error: {state['error_message']}"
+    if any(res.get('error_message') for res in state['results']):
+        overall_error_messages = [f"Sub-query {i+1}: {res['error_message']}" for i, res in enumerate(state['results']) if res.get('error_message')]
+        state['llm_reasoning'] = f"The process completed with errors in some sub-queries: {'; '.join(overall_error_messages)}"
+        state['error_message'] = state['llm_reasoning'] # Set overall error message
     else:
-        print("   [Final Status] Execution completed.")
-        state['llm_reasoning'] = "The query was processed. See results for details."
+        print("   [Final Status] Execution completed successfully for all sub-queries.")
+        state['llm_reasoning'] = "All queries were processed successfully. See results for details."
     return state
- 
+
 # --- Routing Logic ---
 def route_on_tables_selected(state: AgentState) -> str:
     """Routes based on whether tables were selected by the TableSelector for any sub-query."""
-    if any(not res.get('selected_tables') for res in state['results']):
+    if any(not res.get('selected_tables') for res in state['results']):\
         print("    [Router] Some sub-queries found no tables. Routing to 'no_tables_found'.")
         return "no_tables_found"
     print("    [Router] Tables selected for all sub-queries. Routing to 'relationship_mapper'.")
@@ -1795,36 +1794,53 @@ def route_from_sql_executor(state: AgentState) -> str:
 
 def route_from_error_remediation(state: AgentState):
     """Routes based on the classified error type for a specific sub-query."""
+    # Check if any sub-query still has an error and needs remediation
+    needs_remediation = False
+    for result in state['results']:
+        if result.get('error_message'):
+            needs_remediation = True
+            break
+
+    if not needs_remediation:
+        print("    [Router] No errors remaining after remediation. Routing to 'final_answer'.")
+        return "final_answer"
+
+    # If there are errors, try to determine the best retry path
     remediation_suggestion = None
     for result in state['results']:
         if result.get('error_message'):
             remediation_suggestion = result.get('remediation_suggestion', '')
-            break
+            break # Take the first error's suggestion for routing decision
 
-    # FIXED: Pass remediation_suggestion to the next state on retry
-    if remediation_suggestion:
-        state['remediation_advice'] = remediation_suggestion
-    else:
-        state['remediation_advice'] = None
+    # Increment current attempt only if we are actually retrying
+    if state.get('current_attempt', 0) < CONFIG["recursion_limit"] -1: # Use CONFIG's recursion limit
+        state['current_attempt'] = state.get('current_attempt', 0) + 1
+        print(f"    [Retry] Attempt {state['current_attempt']}.")
 
-    if "Table Selection" in (remediation_suggestion or "") or "Relationship Mapping" in (remediation_suggestion or ""):
-        if state.get('current_attempt', 0) < 2:
-            state['current_attempt'] = state.get('current_attempt', 0) + 1
-            print(f"    [Retry] Re-attempting from 'table_selector' after remediation. Attempt {state['current_attempt']}.")
+        # Pass remediation_suggestion to the next state on retry
+        if remediation_suggestion:
+            state['remediation_advice'] = remediation_suggestion
+        else:
+            state['remediation_advice'] = None # Clear if no specific advice
+
+        if "Table Selection" in (remediation_suggestion or "") or "Relationship Mapping" in (remediation_suggestion or ""):
+            print(f"    [Retry] Re-attempting from 'table_selector' after remediation.")
             return "table_selector"
-    
-    if "SQL Generator" in (remediation_suggestion or "") or "Syntax" in (remediation_suggestion or ""):
-        if state.get('current_attempt', 0) < 2:
-            state['current_attempt'] = state.get('current_attempt', 0) + 1
-            print(f"    [Retry] Re-attempting from 'sql_generator' after remediation. Attempt {state['current_attempt']}.")
-            return "sql_generator"
 
-    print("    [Failure] Cannot resolve with a retry or max attempts reached. Routing to 'final_answer'.")
+        if "SQL Generator" in (remediation_suggestion or "") or "Syntax" in (remediation_suggestion or ""):
+            print(f"    [Retry] Re-attempting from 'sql_generator' after remediation.")
+            return "sql_generator"
+    else:
+        print(f"    [Failure] Max attempts ({CONFIG['recursion_limit']}) reached. Cannot resolve with a retry. Routing to 'final_answer'.")
+        # Set a clear overall error message if max attempts reached
+        state['error_message'] = f"Max remediation attempts reached ({CONFIG['recursion_limit']}). Could not resolve all errors."
+        return "final_answer"
+
+    # Default fallback if no specific retry path is determined
+    print("    [Failure] Unclassified error or no specific retry path. Routing to 'final_answer'.")
     return "final_answer"
 
 
-
-# --- Build the LangGraph Workflow ---
 # --- Build the LangGraph Workflow ---
 workflow = StateGraph(AgentState)
 
@@ -1953,11 +1969,12 @@ def run_db_agent(query: str):
         "llm_reasoning": "",
         "intermediate_steps": []
     }
-  
+
     try:
-        print(f"\n--- Running agent for query: '{query}' ---")
-        final_state = app.invoke(initial_state)
-        
+        print(f"\n{'='*80}\nTEST CASE: {query}\n{'='*80}\n")
+        # Ensure recursion_limit is passed correctly to app.invoke
+        final_state = app.invoke(initial_state, config={"recursion_limit": CONFIG["recursion_limit"]})
+
         # Aggregate and display results for all sub-queries
         print(f"\n{'='*80}\n🏁 TEST COMPLETE FOR QUERY: '{query}'\n{'='*80}")
         if final_state.get('error_message'):
@@ -1992,22 +2009,22 @@ TEST_QUERIES = [
     "List all customers with their email and phone?",
     "Which customer placed the highest total order amount?",
     "Which customers made purchases in the last 7 days?",
-    "How many customers have placed more than one order?", 
+    "How many customers have placed more than one order?",
     "List all products available in the store?",
     "Which products are currently low in stock?",
     "What is the most expensive product?",
     "Which product is sold the most?",
-    "Show product details with their current stock?", 
+    "Show product details with their current stock?",
     "What are the total sales per day?",
     "Which products were sold on 2025-07-08?",
-    "How much revenue has been generated from product Printer?", 
-    "Show the top 5 highest sales by value?", 
-    "What is the total quantity sold for each product?", 
+    "How much revenue has been generated from product Printer?",
+    "Show the top 5 highest sales by value?",
+    "What is the total quantity sold for each product?",
     "List all orders with customer names and total amounts?",
     "How many orders were placed this month?",
     "Which orders include multiple products?",
     "What is the average order value?",
-    "Show orders with sale details for each product?", 
+    "Show orders with sale details for each product?",
     "Which products were recently purchased into inventory?",
     "Who are the top suppliers based on quantity delivered??",
     "What is the stock change after each sale?",
