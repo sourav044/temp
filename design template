@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ablation GIF Simulation</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .container {
+            background-color: #ffffff;
+            border-radius: 24px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.15);
+            padding: 32px;
+            max-width: 600px; /* Wider to accommodate side-by-side layout */
+            width: 100%;
+            min-height: 700px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            overflow: hidden;
+        }
+
+        .main-content-area {
+            display: flex;
+            flex-direction: column; /* Stacks logo, then simulation visuals, then text box */
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            flex-grow: 1;
+            padding: 20px 0;
+            position: relative; /* For absolute positioning of hidden elements */
+        }
+
+        .logo-display {
+            margin-bottom: 30px; /* Space between logo and text box */
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+            position: absolute; /* Position absolutely to not affect layout when hidden */
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%); /* Center the logo */
+            z-index: 10; /* Ensure it's on top */
+        }
+        .logo-display.hidden {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(0.8);
+            pointer-events: none;
+        }
+        .logo-display img {
+            max-width: 200px; /* Adjust logo size */
+            height: auto;
+            border-radius: 12px; /* Soften logo edges */
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        /* New container for agent and features to manage their side-by-side layout */
+        .simulation-visuals-container {
+            display: flex; /* Make it a flex container for side-by-side */
+            justify-content: space-around; /* Distribute space */
+            align-items: center; /* Vertically align */
+            width: 100%;
+            flex-grow: 1; /* Allow it to take available space */
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+            position: absolute; /* Position absolutely to not affect layout when hidden */
+            top: 0;
+            left: 0;
+            height: 100%; /* Take full height of main-content-area */
+            width: 100%; /* Take full width of main-content-area */
+        }
+        .simulation-visuals-container.hidden-state {
+            opacity: 0;
+            transform: scale(0.8);
+            pointer-events: none;
+        }
+
+        .model-agent-section,
+        .features-section {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            /* No need for hidden-state here, managed by parent .simulation-visuals-container */
+        }
+
+        .agent-core {
+            width: 120px;
+            height: 120px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(45deg, #4f46e5, #6366f1);
+            border-radius: 50%;
+            box-shadow: 0 0 30px rgba(79, 70, 229, 0.6);
+            transition: all 0.4s ease-in-out;
+            animation: none;
+        }
+        .agent-core.pulse {
+            animation: agent-pulse-glow 1.5s infinite alternate;
+        }
+
+        @keyframes agent-pulse-glow {
+            0% {
+                box-shadow: 0 0 15px rgba(79, 70, 229, 0.4), 0 0 0px rgba(79, 70, 229, 0);
+                transform: scale(1);
+            }
+            100% {
+                box-shadow: 0 0 40px rgba(79, 70, 229, 0.8), 0 0 10px rgba(79, 70, 229, 0.6);
+                transform: scale(1.08);
+            }
+        }
+
+        .agent-icon {
+            width: 70%;
+            height: 70%;
+            fill: white;
+        }
+
+        .features {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            align-items: center;
+        }
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            background: linear-gradient(145deg, #f0f4f8, #e2e8f0);
+            padding: 12px 20px;
+            border-radius: 20px;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+            transition: all 0.5s ease-in-out;
+            transform: translateY(0);
+            opacity: 1;
+            width: 180px;
+            justify-content: center;
+            font-weight: 600;
+            color: #334155;
+            border: 1px solid #d1d8e0;
+        }
+
+        .feature-item:hover {
+            transform: translateY(-5px) scale(1.02);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+        }
+
+        .feature-item.removed {
+            transform: translateY(100px) scale(0.6);
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .feature-item.highlight {
+            border: 3px solid #4f46e5;
+            box-shadow: 0 0 25px rgba(79, 70, 229, 0.8);
+            transform: scale(1.1);
+            background: linear-gradient(145deg, #818cf8, #4f46e5);
+            color: white;
+        }
+
+        .feature-item.hidden-state {
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0);
+        }
+
+        .feature-icon {
+            width: 32px;
+            height: 32px;
+            fill: currentColor;
+        }
+
+        .performance-box {
+            background: linear-gradient(145deg, #e0eafc, #cfdef3);
+            border: 2px solid #bfdbfe;
+            padding: 18px 28px;
+            border-radius: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+            font-size: 2rem;
+            font-weight: 700;
+            color: #1e40af;
+            min-width: 200px;
+            justify-content: center;
+            transition: all 0.6s cubic-bezier(0.25, 0.8, 0.25, 1);
+            opacity: 0;
+            transform: translateY(40px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+        }
+
+        .performance-box.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .performance-box.good {
+            background: linear-gradient(145deg, #dcfce7, #a7f3d0);
+            border-color: #4ade80;
+            color: #16a34a;
+        }
+
+        .performance-box.bad {
+            background: linear-gradient(145deg, #fee2e2, #fca5a5);
+            border-color: #ef4444;
+            color: #dc2626;
+        }
+        .performance-box.hidden-state {
+            opacity: 0;
+            transform: scale(0);
+        }
+
+        .status-icon {
+            width: 45px;
+            height: 45px;
+        }
+
+        .text-box {
+            background-color: #f8fafc;
+            border: 1px solid #cbd5e1;
+            padding: 15px 20px;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            text-align: center;
+            color: #475569;
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 90%;
+            transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+            margin-top: auto;
+            margin-bottom: 20px;
+        }
+        .text-box.hidden-state {
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0);
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* SVG Icons */
+        .svg-gear { fill: currentColor; }
+        .svg-magnifying-glass { fill: currentColor; }
+        .svg-lightbulb { fill: currentColor; }
+        .svg-checkmark { fill: #16a34a; }
+        .svg-xmark { fill: #dc2626; }
+
+        .controls {
+            display: flex;
+            gap: 16px;
+            margin-top: 20px;
+            width: 100%;
+            justify-content: center;
+            padding-bottom: 10px;
+        }
+
+        .control-button {
+            background-color: #3b82f6;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
+            box-shadow: 0 4px 10px rgba(59, 130, 246, 0.3);
+        }
+
+        .control-button:hover {
+            background-color: #2563eb;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(59, 130, 246, 0.4);
+        }
+
+        .control-button:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 5px rgba(59, 130, 246, 0.2);
+        }
+
+        .control-button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .container {
+                padding: 16px;
+                height: auto;
+                max-width: 95%;
+            }
+            .main-content-area {
+                flex-direction: column; /* Stack on small screens */
+                gap: 40px; /* More space when stacked */
+            }
+            .performance-box {
+                font-size: 1.5rem;
+                min-width: unset;
+                width: 90%;
+            }
+            .control-button {
+                padding: 10px 20px;
+                font-size: 0.9rem;
+            }
+            .controls {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-100vh p-4">
+    <div class="container">
+        <h1 class="text-2xl font-bold text-gray-800 text-center">Ablation Explained</h1>
+
+        <div class="main-content-area">
+            <!-- Logo for the start screen -->
+            <div id="startLogo" class="logo-display">
+                <img src="https://yt3.ggpht.com/Gv8_QaXl1K-ShN2rzHCmnpaRGH_B-SrTMI_92G1Nq75krEHp1bYRelS3oqUdN3Z-JC_-7umfLQ=s600-c-k-c0x00ffffff-no-rj-rp-mo" alt="Your Logo">
+            </div>
+
+            <!-- New container for agent and features to manage their side-by-side layout -->
+            <div id="simulationVisualsContainer" class="simulation-visuals-container hidden-state">
+                <div class="model-agent-section">
+                    <!-- Agent Core (formerly model-brain) -->
+                    <div id="agentCore" class="agent-core">
+                        <svg class="agent-icon" viewBox="0 0 100 100">
+                            <rect x="10" y="10" width="80" height="80" rx="15" ry="15" fill="white"/>
+                            <circle cx="50" cy="50" r="20" fill="#818cf8"/>
+                            <path d="M30 50 L45 35 L45 65 Z" fill="#c7d2fe"/>
+                            <path d="M70 50 L55 35 L55 65 Z" fill="#c7d2fe"/>
+                        </svg>
+                    </div>
+                    <!-- Performance Display -->
+                    <div id="performanceBox" class="performance-box show">
+                        <span id="performanceText"></span>
+                        <svg id="statusIcon" class="status-icon hidden" viewBox="0 0 24 24">
+                            <!-- Checkmark SVG -->
+                            <path id="checkmarkPath" class="svg-checkmark hidden" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                            <!-- X-mark SVG -->
+                            <path id="xmarkPath" class="svg-xmark hidden" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="features-section">
+                    <div class="features">
+                        <!-- Feature 1: Gear -->
+                        <div id="feature1" class="feature-item">
+                            <svg class="feature-icon svg-gear" viewBox="0 0 24 24">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.79-6.84-4.34-6.84-8.43 0-.77.1-1.53.27-2.26L11 11.2V19.93zm6.93-2.52l-2.09-2.09c.3-.59.47-1.25.47-1.95 0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5c.7 0 1.36-.17 1.95-.47l2.09 2.09c.39.39 1.02.39 1.41 0 .39-.39.39-1.02 0-1.41zM12 4.07c3.95.79 6.84 4.34 6.84 8.43 0 .77-.1 1.53-.27 2.26L13 12.8V4.07z"/>
+                            </svg>
+                            <span>Feature 1</span>
+                        </div>
+                        <!-- Feature 2: Magnifying Glass -->
+                        <div id="feature2" class="feature-item">
+                            <svg class="feature-icon svg-magnifying-glass" viewBox="0 0 24 24">
+                                <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                            </svg>
+                            <span>Feature 2</span>
+                        </div>
+                        <!-- Feature 3: Lightbulb -->
+                        <div id="feature3" class="feature-item">
+                            <svg class="feature-icon svg-lightbulb" viewBox="0 0 24 24">
+                                <path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19c-3.87 0-7 3.13-7 7 0 2.88 1.74 5.33 4.25 6.42.35.84.9 1.58 1.6 2.18h2.3c.7-.6 1.25-1.34 1.6-2.18C15.26 14.33 17 11.88 17 9c0-3.87-3.13-7-7-7zm-1 10h2V9h-2v3z"/>
+                            </svg>
+                            <span>Feature 3</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene Description Text Box -->
+        <div id="textBox" class="text-box"></div>
+
+        <div class="controls">
+            <button id="previousScenarioButton" class="control-button">Previous Step</button>
+            <button id="nextScenarioButton" class="control-button">Next Step</button>
+            <button id="resetButton" class="control-button">Reset Simulation</button>
+        </div>
+    </div>
+
+    <script>
+        // Get DOM elements
+        const feature1 = document.getElementById('feature1');
+        const feature2 = document.getElementById('feature2');
+        const feature3 = document.getElementById('feature3');
+        const agentCore = document.getElementById('agentCore');
+        const performanceBox = document.getElementById('performanceBox');
+        const performanceText = document.getElementById('performanceText');
+        const statusIcon = document.getElementById('statusIcon');
+        const checkmarkPath = document.getElementById('checkmarkPath');
+        const xmarkPath = document.getElementById('xmarkPath');
+        const textBox = document.getElementById('textBox');
+        const nextScenarioButton = document.getElementById('nextScenarioButton');
+        const previousScenarioButton = document.getElementById('previousScenarioButton');
+        const resetButton = document.getElementById('resetButton');
+        const startLogo = document.getElementById('startLogo');
+        const simulationVisualsContainer = document.getElementById('simulationVisualsContainer');
+
+        let currentSceneIndex = 0;
+        let isAnimating = false;
+
+        // Define the sequence of scenes with their properties
+        const scenes = [
+            // Scene 0: Start Screen - Initial state with instruction and logo
+            {
+                text: "Click 'Next Step' to begin the Ablation Simulation.",
+                accuracy: null,
+                featuresVisible: false, // Controls visibility of agent and features sections
+                featureStates: { feature1: 'hidden', feature2: 'hidden', feature3: 'hidden' },
+                textBoxVisible: true,
+                logoVisible: true // Logo visible for start screen
+            },
+            // Scene 1: Full Model (Initial) - Features and 90% accuracy, no specific text
+            {
+                text: "AI Model is trained with all 3 features.",
+                accuracy: 90,
+                isGood: true,
+                featuresVisible: true,
+                featureStates: { feature1: 'normal', feature2: 'normal', feature3: 'normal' },
+                textBoxVisible: true,
+                logoVisible: false // Hide logo after start screen
+            },
+            // Scene 2: Highlighting Feature 2
+            {
+                text: "Ablation: Highlighting Feature 2 (Magnify) to test its importance.",
+                accuracy: 90,
+                isGood: true,
+                featuresVisible: true,
+                featureStates: { feature1: 'normal', feature2: 'highlight', feature3: 'normal' },
+                textBoxVisible: true,
+                logoVisible: false
+            },
+            // Scene 3: Feature 2 Removed - Specific text for this step
+            {
+                text: "If the retrained model performs significantly worse (for instance, 55% precision), then the removed feature was probably important.",
+                accuracy: 60,
+                isGood: false,
+                featuresVisible: true,
+                featureStates: { feature1: 'normal', feature2: 'removed', feature3: 'normal' },
+                textBoxVisible: true,
+                logoVisible: false
+            },
+            // Scene 4: Resetting for next test (Feature 2 back)
+            {
+                text: "Resetting for next test. All features restored.",
+                accuracy: 90,
+                isGood: true,
+                featuresVisible: true,
+                featureStates: { feature1: 'normal', feature2: 'normal', feature3: 'normal' },
+                textBoxVisible: true,
+                logoVisible: false
+            },
+            // Scene 5: Highlighting Feature 3
+            {
+                text: "Now, highlighting Feature 3 (Lightbulb) for ablation.",
+                accuracy: 90,
+                isGood: true,
+                featuresVisible: true,
+                featureStates: { feature1: 'normal', feature2: 'normal', feature3: 'highlight' },
+                textBoxVisible: true,
+                logoVisible: false
+            },
+            // Scene 6: Feature 3 Removed - Updated text for this step
+            {
+                text: "If the retrained model performs equally well, then that feature was probably not that important.",
+                accuracy: 85,
+                isGood: true,
+                featuresVisible: true,
+                featureStates: { feature1: 'normal', feature2: 'normal', feature3: 'removed' },
+                textBoxVisible: true,
+                logoVisible: false
+            }
+        ];
+
+        // Function to apply feature states (normal, highlight, removed, hidden)
+        function applyFeatureState(featureElement, state) {
+            featureElement.classList.remove('normal', 'highlight', 'removed', 'hidden-state');
+            if (state === 'normal') {
+                // No specific class needed for 'normal' as it's the default visual state
+            } else if (state === 'hidden') {
+                featureElement.classList.add('hidden-state');
+            } else {
+                featureElement.classList.add(state);
+            }
+        }
+
+        // Function to show the correct status icon
+        function showStatusIcon(type) {
+            statusIcon.classList.remove('hidden');
+            if (type === 'checkmark') {
+                checkmarkPath.classList.remove('hidden');
+                xmarkPath.classList.add('hidden');
+            } else if (type === 'xmark') {
+                xmarkPath.classList.remove('hidden');
+                checkmarkPath.classList.add('hidden');
+            }
+        }
+
+        // Function to update performance display
+        function updatePerformance(accuracy, isGood) {
+            if (accuracy === null) {
+                performanceBox.classList.add('hidden-state');
+            } else {
+                performanceBox.classList.remove('hidden-state');
+                performanceText.textContent = `${accuracy}% Accuracy`;
+                performanceBox.classList.remove('good', 'bad');
+                performanceBox.classList.add(isGood ? 'good' : 'bad');
+                showStatusIcon(isGood ? 'checkmark' : 'xmark');
+                performanceBox.classList.add('show');
+            }
+        }
+
+        // Function to disable/enable all navigation buttons during animation
+        function setButtonsDisabled(disabled) {
+            nextScenarioButton.disabled = disabled;
+            previousScenarioButton.disabled = disabled;
+            resetButton.disabled = disabled;
+            isAnimating = disabled;
+        }
+
+        // Function to update the current scene
+        function runScene(index) {
+            setButtonsDisabled(true);
+
+            const scene = scenes[index];
+
+            // Manage logo visibility
+            if (startLogo) {
+                if (scene.logoVisible) {
+                    startLogo.classList.remove('hidden');
+                } else {
+                    startLogo.classList.add('hidden');
+                }
+            }
+
+            // Manage visibility of the simulation visuals container (agent and features)
+            if (simulationVisualsContainer) {
+                if (scene.featuresVisible) {
+                    simulationVisualsContainer.classList.remove('hidden-state');
+                } else {
+                    simulationVisualsContainer.classList.add('hidden-state');
+                }
+            }
+
+            // Apply feature states
+            applyFeatureState(feature1, scene.featureStates.feature1);
+            applyFeatureState(feature2, scene.featureStates.feature2);
+            applyFeatureState(feature3, scene.featureStates.feature3);
+            
+            // Set text for the scene and manage text box visibility
+            if (textBox) {
+                textBox.textContent = scene.text;
+                if (scene.textBoxVisible) {
+                    textBox.classList.remove('hidden-state');
+                } else {
+                    textBox.classList.add('hidden-state');
+                }
+            }
+            
+            updatePerformance(scene.accuracy, scene.isGood);
+
+            // Add pulse animation to agent core when accuracy changes
+            if (index > 0 && scenes[index].accuracy !== scenes[index-1].accuracy) {
+                agentCore.classList.add('pulse');
+            } else {
+                agentCore.classList.remove('pulse');
+            }
+
+
+            setTimeout(() => {
+                setButtonsDisabled(false);
+                updateNavigationButtons();
+            }, 1000);
+        }
+
+        // Function to advance to the next step
+        function nextStep() {
+            if (isAnimating) return;
+
+            if (currentSceneIndex < scenes.length - 1) {
+                currentSceneIndex++;
+                runScene(currentSceneIndex);
+            } else {
+                resetSimulation();
+            }
+        }
+
+        // Function to go back to the previous step
+        function previousStep() {
+            if (isAnimating) return;
+
+            if (currentSceneIndex > 0) {
+                currentSceneIndex--;
+                runScene(currentSceneIndex);
+            }
+        }
+
+        // Function to update the disabled state and text of navigation buttons
+        function updateNavigationButtons() {
+            previousScenarioButton.disabled = (currentSceneIndex === 0);
+            nextScenarioButton.textContent = (currentSceneIndex === scenes.length - 1) ? "Restart Simulation" : "Next Step";
+        }
+
+        // Function to reset the entire simulation to its initial state
+        function resetSimulation() {
+            setButtonsDisabled(true);
+
+            currentSceneIndex = 0;
+            runScene(currentSceneIndex);
+
+            // Ensure pulse animation is removed on reset
+            agentCore.classList.remove('pulse');
+
+            setTimeout(() => {
+                setButtonsDisabled(false);
+                updateNavigationButtons();
+            }, 500);
+        }
+
+        // Event Listeners for buttons
+        nextScenarioButton.addEventListener('click', nextStep);
+        previousScenarioButton.addEventListener('click', previousStep);
+        resetButton.addEventListener('click', resetSimulation);
+
+        // Initial setup on window load
+        window.onload = function() {
+            resetSimulation();
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ablation GIF Simulation</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MathJax CDN for LaTeX rendering -->
+    <script type="text/javascript" id="MathJax-script" async
+        src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js">
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .container {
+            background-color: #ffffff;
+            border-radius: 24px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.15);
+            padding: 32px;
+            max-width: 600px;
+            width: 100%;
+            min-height: 700px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            overflow: hidden;
+        }
+
+        .main-content-area {
+            display: flex;
+            flex-direction: column;
+            justify-content: center; /* Center content vertically */
+            align-items: center; /* Center content horizontally */
+            width: 100%;
+            flex-grow: 1;
+            padding: 20px 0;
+            position: relative; /* For absolute positioning of hidden elements */
+        }
+
+        /* Styles for the dynamically displayed content */
+        .logo-display,
+        .image-display-area,
+        .text-box,
+        .formula-display-area { /* New class for formula display */
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+            width: 100%; /* Take full width of parent */
+            display: flex; /* Use flex to center content inside these divs */
+            justify-content: center;
+            align-items: center;
+            flex-grow: 1; /* Allow them to take available space */
+            padding: 10px 0; /* Add some padding for spacing */
+        }
+
+        .logo-display.hidden,
+        .image-display-area.hidden,
+        .text-box.hidden,
+        .formula-display-area.hidden { /* Hide formula display when not in use */
+            opacity: 0;
+            transform: scale(0.8);
+            pointer-events: none;
+            position: absolute; /* Hide by absolute positioning to prevent layout shift */
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) scale(0.8);
+        }
+
+        .logo-display img {
+            max-width: 200px;
+            height: auto;
+            border-radius: 12px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .image-display-area img {
+            max-width: 90%;
+            height: auto;
+            border-radius: 12px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .text-box {
+            background-color: #f8fafc;
+            border: 1px solid #cbd5e1;
+            padding: 15px 20px;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            text-align: left; /* Changed to left for readability of longer text */
+            color: #475569;
+            max-height: 250px; /* Set a max-height to enable scrolling */
+            overflow-y: auto; /* Enable vertical scrolling */
+            line-height: 1.5; /* Improved line spacing */
+            display: block; /* Changed from flex to block for natural text flow */
+        }
+
+        /* Styling for h2 tags within the text-box */
+        .text-box h2 {
+            font-size: 1.3rem; /* Slightly larger for headings */
+            font-weight: 700; /* Bolder */
+            color: #3b82f6; /* Blue color for emphasis */
+            margin-top: 1.2em; /* Space above headings */
+            margin-bottom: 0.5em; /* Space below headings */
+            text-align: left; /* Ensure headings are left-aligned */
+        }
+
+        .formula-display-area {
+            background-color: #e0eafc;
+            border: 2px solid #bfdbfe;
+            padding: 20px;
+            border-radius: 15px;
+            margin: 20px 0; /* Spacing above and below */
+            font-size: 1.5rem; /* Larger font for formulas */
+            font-weight: 600;
+            color: #1e40af;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        .controls {
+            display: flex;
+            gap: 16px;
+            margin-top: 20px;
+            width: 100%;
+            justify-content: center;
+            padding-bottom: 10px;
+        }
+
+        .control-button {
+            background-color: #3b82f6;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
+            box-shadow: 0 4px 10px rgba(59, 130, 246, 0.3);
+        }
+
+        .control-button:hover {
+            background-color: #2563eb;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(59, 130, 246, 0.4);
+        }
+
+        .control-button:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 5px rgba(59, 130, 246, 0.2);
+        }
+
+        .control-button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .container {
+                padding: 16px;
+                height: auto;
+                max-width: 95%;
+            }
+            .main-content-area {
+                flex-direction: column;
+                gap: 40px;
+            }
+            .control-button {
+                padding: 10px 20px;
+                font-size: 0.9rem;
+            }
+            .controls {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-100vh p-4">
+    <div class="container">
+        <h1 id="mainTitle" class="text-2xl font-bold text-gray-800 text-center"></h1>
+
+        <div class="main-content-area">
+            <!-- Logo for the start screen -->
+            <div id="startLogo" class="logo-display">
+                <img src="https://yt3.ggpht.com/Gv8_QaXl1K-ShN2rzHCmnpaRGH_B-SrTMI_92G1Nq75krEHp1bYRelS3oqUdN3Z-JC_-7umfLQ=s600-c-k-c0x00ffffff-no-rj-rp-mo" alt="Your Logo">
+            </div>
+
+            <!-- Area for Confusion Matrix Image -->
+            <div id="imageDisplayArea" class="image-display-area hidden">
+                <img id="confusionMatrixImage" src="" alt="Confusion Matrix">
+            </div>
+
+            <!-- Area for Formula Display -->
+            <div id="formulaDisplayArea" class="formula-display-area hidden"></div>
+
+            <!-- Scene Description Text Box -->
+            <div id="textBox" class="text-box hidden"></div>
+        </div>
+
+        <div class="controls">
+            <button id="previousScenarioButton" class="control-button">Previous Step</button>
+            <button id="nextScenarioButton" class="control-button">Next Step</button>
+            <button id="resetButton" class="control-button">Reset Simulation</button>
+        </div>
+    </div>
+
+    <script>
+        // Get DOM elements
+        const mainTitle = document.getElementById('mainTitle');
+        const textBox = document.getElementById('textBox');
+        const nextScenarioButton = document.getElementById('nextScenarioButton');
+        const previousScenarioButton = document.getElementById('previousScenarioButton');
+        const resetButton = document.getElementById('resetButton');
+        const startLogo = document.getElementById('startLogo');
+        const imageDisplayArea = document.getElementById('imageDisplayArea');
+        const confusionMatrixImage = document.getElementById('confusionMatrixImage');
+        const formulaDisplayArea = document.getElementById('formulaDisplayArea');
+
+        let currentSceneIndex = 0;
+        let isAnimating = false;
+
+        // Define the sequence of scenes with their properties
+        const scenes = [
+            // Scene 0: Landing Page
+            {
+                title: "Accuracy, Precision, Recall, and F1 Score",
+                text: "Click 'Next Step' to begin the Simulation.",
+                displayElement: 'logo', // Show the logo
+                imageUrl: null,
+                formulaHtml: null
+            },
+            // Scene 1: Confusion Matrix
+            {
+                title: "Confusion Matrix",
+                text: `
+                    <p>The Confusion Matrix is a table used to evaluate the performance of a classification model. It summarizes the number of correct and incorrect predictions made by the classifier, broken down by each class. It shows True Positives (TP), True Negatives (TN), False Positives (FP), and False Negatives (FN).</p>
+                `,
+                displayElement: 'image', // Show the image
+                imageUrl: "https://raw.githubusercontent.com/sourav044/temp/refs/heads/main/ChatGPT%20Image%20Jul%2019%2C%202025%2C%2004_00_20%20PM.png",
+                formulaHtml: null
+            },
+            // Scene 2: Accuracy
+            {
+                title: "Accuracy Explained",
+                text: `
+                    <h2>What is it?</h2>
+                    <p>Accuracy tells you what percentage of all people were correctly tested—whether they had COVID or not.</p>
+                    <h2>When should you use it?</h2>
+                    <p>Use accuracy when the number of people with COVID and the number without COVID are about the same.</p>
+                    <h2>Why?</h2>
+                    <p>Because in this case, getting both positives and negatives correct is equally important.</p>
+                    <h2>But be careful!</h2>
+                    <p>If almost everyone is healthy, a test that always says "not COVID" will have high accuracy—but it's actually not helpful.</p>
+                    <p>If we test 100 people and 90 are correctly identified (positive or negative), our accuracy is 90%. But accuracy can be misleading if most people don’t have COVID.</p>
+                `,
+                displayElement: 'formula', // Show the formula
+                imageUrl: null,
+                formulaHtml: "$$ \\text{Accuracy} = \\frac{\\text{correct classifications}}{\\text{total classifications}} = \\frac{\\text{TP} + \\text{TN}}{\\text{TP} + \\text{TN} + \\text{FP} + \\text{FN}} $$"
+            },
+            // Scene 3: Precision
+            {
+                title: "Precision Explained",
+                text: `
+                    <h2>What is it?</h2>
+                    <p>Precision tells you, out of all the people the test said have COVID, how many actually have it.</p>
+                    <h2>When should you use it?</h2>
+                    <p>Use precision when it’s very important to be sure that a positive test really means the person has COVID.</p>
+                    <h2>Why?</h2>
+                    <p>Because a false positive can cause someone to worry, isolate unnecessarily, or even get unnecessary treatment.</p>
+                    <h2>Example:</h2>
+                    <p>If your test says 10 people have COVID but only 5 really do, precision is low—many people are wrongly told they’re sick. If 10 people tested positive, but only 7 really had COVID, precision is 7/10 = 70%. High precision means when the test says ‘positive,’ it’s usually correct.</p>
+                `,
+                displayElement: 'formula',
+                imageUrl: null,
+                formulaHtml: "$$ \\text{Precision} = \\frac{\\text{True Positives}}{\\text{True Positives} + \\text{False Positives}} = \\frac{\\text{TP}}{\\text{TP} + \\text{FP}} $$"
+            },
+            // Scene 4: Recall
+            {
+                title: "Recall Explained",
+                text: `
+                    <h2>What is it?</h2>
+                    <p>Recall tells you, out of everyone who actually has COVID, how many were correctly identified by the test.</p>
+                    <h2>When should you use it?</h2>
+                    <p>Use recall when it’s critical not to miss any true COVID cases.</p>
+                    <h2>Why?</h2>
+                    <p>Because missing even one true case means that person could keep spreading the virus without knowing.</p>
+                    <h2>Example:</h2>
+                    <p>If 20 people have COVID but the test only finds 12 of them, recall is low—some sick people go undetected. If there were 20 people with COVID, and the test found 15, recall is 15/20 = 75%. High recall means the test catches most infected people.</p>
+                `,
+                displayElement: 'formula',
+                imageUrl: null,
+                formulaHtml: "$$ \\text{Recall} = \\frac{\\text{True Positives}}{\\text{True Positives} + \\text{False Negatives}} = \\frac{\\text{TP}}{\\text{TP} + \\text{FN}} $$"
+            },
+            // Scene 5: F1 Score
+            {
+                title: "F1 Score Explained",
+                text: `
+                    <h2>What is it?</h2>
+                    <p>The F1 Score is a way to combine both precision and recall into a single number. It helps you understand if your test is balanced—catching real cases, but not giving too many false alarms.</p>
+                    <h2>When should you use it?</h2>
+                    <p>Use F1 Score when your data is imbalanced (for example, there are a lot more healthy people than sick), and you care about both finding true cases and avoiding false positives.</p>
+                    <h2>Why?</h2>
+                    <p>Because sometimes you need a middle ground—making sure you find most true cases without causing panic with too many false positives.</p>
+                    <h2>Example:</h2>
+                    <p>If your test finds most cases but sometimes gives false alarms, the F1 Score shows you the overall balance.</p>
+                     
+                `,
+                displayElement: 'formula',
+                imageUrl: null,
+                formulaHtml: "$$ \\text{F1 Score} = 2 \\times \\frac{\\text{Precision} \\times \\text{Recall}}{\\text{Precision} + \\text{Recall}} $$"
+            }
+        ];
+
+        /**
+         * Disables or enables all navigation buttons to prevent rapid clicks during animations.
+         * @param {boolean} disabled - True to disable buttons, false to enable.
+         */
+        function setButtonsDisabled(disabled) {
+            nextScenarioButton.disabled = disabled;
+            previousScenarioButton.disabled = disabled;
+            resetButton.disabled = disabled;
+            isAnimating = disabled; // Set animation flag
+        }
+
+        /**
+         * Runs a specific scene based on its index, updating the UI elements accordingly.
+         * @param {number} index - The index of the scene to run.
+         */
+        function runScene(index) {
+            setButtonsDisabled(true); // Disable buttons during scene transition
+
+            const scene = scenes[index];
+
+            // Update the main title based on the current scene's title
+            if (mainTitle) {
+                mainTitle.textContent = scene.title;
+            }
+
+            // Hide all primary display elements first
+            startLogo.classList.add('hidden');
+            imageDisplayArea.classList.add('hidden');
+            formulaDisplayArea.classList.add('hidden'); // Hide formula area
+            textBox.classList.add('hidden'); // Hide text box initially
+
+            // Show the relevant element(s) based on displayElement
+            if (scene.displayElement === 'logo') {
+                startLogo.classList.remove('hidden');
+                textBox.classList.remove('hidden'); // Show text box for logo scene
+                textBox.innerHTML = scene.text;
+                // Typeset MathJax for the text box (even if no formula, to clear previous)
+                if (typeof MathJax !== 'undefined') {
+                    MathJax.typesetPromise([textBox]).catch((err) => console.error("MathJax typesetting failed:", err));
+                }
+            } else if (scene.displayElement === 'image') {
+                imageDisplayArea.classList.remove('hidden');
+                confusionMatrixImage.src = scene.imageUrl;
+                textBox.classList.remove('hidden'); // Show text box for image scene
+                textBox.innerHTML = scene.text; // Set text content for description
+                if (typeof MathJax !== 'undefined') {
+                    MathJax.typesetPromise([textBox]).catch((err) => console.error("MathJax typesetting failed:", err));
+                }
+            } else if (scene.displayElement === 'formula') {
+                formulaDisplayArea.classList.remove('hidden'); // Show formula area
+                formulaDisplayArea.innerHTML = scene.formulaHtml; // Set formula content
+                textBox.classList.remove('hidden'); // Show text box for formula scene
+                textBox.innerHTML = scene.text; // Set text content for description
+                
+                // Re-typeset MathJax for both formula and text box
+                if (typeof MathJax !== 'undefined') {
+                    MathJax.typesetPromise([formulaDisplayArea, textBox]).catch((err) => console.error("MathJax typesetting failed:", err));
+                }
+            }
+            
+            // Re-enable buttons and update their state after a short delay to allow animations to play
+            setTimeout(() => {
+                setButtonsDisabled(false);
+                updateNavigationButtons();
+            }, 1000); // 1-second delay
+        }
+
+        /**
+         * Advances the simulation to the next step (scene).
+         * If at the last step, it resets the simulation.
+         */
+        function nextStep() {
+            if (isAnimating) return; // Prevent multiple clicks during animation
+
+            if (currentSceneIndex < scenes.length - 1) {
+                currentSceneIndex++; // Increment scene index
+                runScene(currentSceneIndex); // Run the new scene
+            } else {
+                resetSimulation(); // If at the end, reset
+            }
+        }
+
+        /**
+         * Reverts the simulation to the previous step (scene).
+         */
+        function previousStep() {
+            if (isAnimating) return; // Prevent multiple clicks during animation
+
+            if (currentSceneIndex > 0) {
+                currentSceneIndex--; // Decrement scene index
+                runScene(currentSceneIndex); // Run the new scene
+            }
+        }
+
+        /**
+         * Updates the disabled state and text of the navigation buttons based on the current scene.
+         */
+        function updateNavigationButtons() {
+            // Disable 'Previous Step' button if at the first scene
+            previousScenarioButton.disabled = (currentSceneIndex === 0);
+            // Change 'Next Step' button text to 'Restart Simulation' if at the last scene
+            nextScenarioButton.textContent = (currentSceneIndex === scenes.length - 1) ? "Restart Simulation" : "Next Step";
+        }
+
+        /**
+         * Resets the entire simulation to its initial start screen state.
+         */
+        function resetSimulation() {
+            setButtonsDisabled(true); // Disable buttons during reset
+
+            currentSceneIndex = 0; // Set current scene to the first one
+            runScene(currentSceneIndex); // Run the first scene
+
+            // Re-enable buttons and update their state after a short delay
+            setTimeout(() => {
+                setButtonsDisabled(false);
+                updateNavigationButtons();
+            }, 500); // 0.5-second delay
+        }
+
+        // Event Listeners for buttons
+        nextScenarioButton.addEventListener('click', nextStep);
+        previousScenarioButton.addEventListener('click', previousStep);
+        resetButton.addEventListener('click', resetSimulation);
+
+        // Initial setup on window load: reset the simulation to its starting state
+        window.onload = function() {
+            resetSimulation();
+        };
+    </script>
+</body>
+</html>
